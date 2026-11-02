@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Project data
+data/
+workspaces/
+*.patch
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

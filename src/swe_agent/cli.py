@@ -71,9 +71,79 @@ def main() -> None:
         raise SystemExit(doctor())
     if command == "llm-test":
         raise SystemExit(llm_test())
-    print("Usage: swe-agent [doctor | llm-test]")
+    if command == "prepare":
+        raise SystemExit(prepare(args[1:]))
+    if command == "clean":
+        raise SystemExit(clean(args[1:]))
+    print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
 
+def prepare(args: list[str]) -> int:
+    """Fetch an issue, clone its repo into a fresh workspace, and print a summary."""
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from swe_agent.github import (
+        GitError,
+        GitHubError,
+        InvalidGitHubUrl,
+        RepoTooLargeError,
+        WorkspaceError,
+        prepare_run,
+        resolve_issue_ref,
+    )
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+
+    if len(args) not in (1, 2):
+        console.print("Usage: swe-agent prepare <issue-url>")
+        console.print("   or: swe-agent prepare <owner/repo> <issue-number>")
+        return 2
+
+    try:
+        ref = resolve_issue_ref(args[0]) if len(args) == 1 else resolve_issue_ref(args[1], args[0])
+        run = prepare_run(ref, settings=settings)
+    except (InvalidGitHubUrl, GitHubError, GitError, RepoTooLargeError, WorkspaceError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+
+    table = Table(title="Run prepared")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Run id", run.workspace.run_id)
+    table.add_row("Repository", run.repo_info.full_name)
+    table.add_row("Language", run.repo_info.language or "unknown")
+    table.add_row("GitHub size (KB)", str(run.repo_info.size_kb))
+    table.add_row("Issue", f"#{run.issue.number} {run.issue.title}")
+    table.add_row("Labels", ", ".join(run.issue.labels) or "-")
+    table.add_row("Base commit", run.head_sha[:12])
+    table.add_row("Work branch", run.branch)
+    table.add_row("Repo folder", str(run.workspace.repo_dir))
+    console.print(table)
+    # Text() shows the issue body as plain text. Rich would treat [brackets] as styling.
+    console.print(Panel(Text(run.issue.body[:600] or "(empty issue body)"), title="Issue body"))
+    return 0
+
+
+def clean(args: list[str]) -> int:
+    """Delete one workspace: swe-agent clean <run_id>"""
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent clean <run_id>")
+        return 2
+    try:
+        WorkspaceManager(settings).delete(args[0])
+    except WorkspaceError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    console.print(f"[green]Deleted workspace {args[0]}[/green]")
+    return 0
 
 _SAMPLE_TITLE = "Login fails when the email has capital letters"
 _SAMPLE_BODY = (

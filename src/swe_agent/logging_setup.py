@@ -12,14 +12,18 @@ _SECRET_PATTERNS = [
 ]
 
 
+def redact_secrets(text: str) -> str:
+    """Replace anything that looks like a secret with [REDACTED]."""
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
+
+
 class SecretRedactingFilter(logging.Filter):
-    """Replaces anything that looks like a secret with [REDACTED]."""
+    """Redacts secrets from every log line before it is printed."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        for pattern in _SECRET_PATTERNS:
-            message = pattern.sub("[REDACTED]", message)
-        record.msg = message
+        record.msg = redact_secrets(record.getMessage())
         record.args = ()  # message is already fully formatted
         return True
 

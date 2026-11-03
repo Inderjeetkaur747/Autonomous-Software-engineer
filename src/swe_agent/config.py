@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     max_repair_attempts: int = Field(default=3, ge=0, le=10)
     command_timeout_seconds: int = Field(default=120, ge=1, le=900)
 
+        # --- GitHub / cloning ---
+    github_api_url: str = "https://api.github.com"
+    github_timeout_seconds: int = Field(default=15, ge=3, le=120)
+    clone_timeout_seconds: int = Field(default=180, ge=10, le=900)
+    max_repo_size_mb: int = Field(default=200, ge=1, le=2000)
+
     # --- Logging ---
     log_level: str = "INFO"
 

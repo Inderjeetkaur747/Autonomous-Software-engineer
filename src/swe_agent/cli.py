@@ -66,7 +66,79 @@ def doctor() -> int:
 
 def main() -> None:
     args = sys.argv[1:]
-    if args and args[0] == "doctor":
+    command = args[0] if args else ""
+    if command == "doctor":
         raise SystemExit(doctor())
-    print("Usage: swe-agent doctor")
+    if command == "llm-test":
+        raise SystemExit(llm_test())
+    print("Usage: swe-agent [doctor | llm-test]")
     raise SystemExit(2)
+
+
+_SAMPLE_TITLE = "Login fails when the email has capital letters"
+_SAMPLE_BODY = (
+    "A user registered with 'john@example.com'. When they log in with 'John@Example.com' "
+    "the app says the user does not exist. Emails should be case-insensitive."
+)
+_SAMPLE_CODE = """\
+# src/auth/login.py (lines 10-22)
+def find_user(email):
+    return db.query(User).filter(User.email == email).first()
+
+def login(email, password):
+    user = find_user(email)
+    if user is None:
+        raise AuthError("user does not exist")
+    return check_password(user, password)
+"""
+
+
+def llm_test() -> int:
+    """Send a sample issue to Groq and print the structured results."""
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+
+    if not settings.groq_api_key.get_secret_value():
+        console.print("[red]GROQ_API_KEY is missing. Fix your .env first.[/red]")
+        return 1
+
+    # Imported here so `doctor` stays fast and works even if these have problems.
+    from swe_agent.llm import GroqLLM, LLMError
+    from swe_agent.llm.prompts import build_analysis_prompts, build_plan_prompts
+    from swe_agent.schemas import ImplementationPlan, IssueAnalysis
+
+    llm = GroqLLM(settings)
+    try:
+        system, user = build_analysis_prompts(_SAMPLE_TITLE, _SAMPLE_BODY, _SAMPLE_CODE)
+        analysis = llm.generate_structured(
+            IssueAnalysis, system=system, user=user, purpose="analysis"
+        )
+        console.rule("Issue analysis")
+        console.print_json(analysis.model_dump_json())
+
+        system, user = build_plan_prompts(
+            _SAMPLE_TITLE, _SAMPLE_BODY, analysis.model_dump_json(), _SAMPLE_CODE
+        )
+        plan = llm.generate_structured(
+            ImplementationPlan, system=system, user=user, purpose="plan"
+        )
+        console.rule("Implementation plan")
+        console.print_json(plan.model_dump_json())
+    except LLMError as exc:
+        console.print(f"[red]LLM error:[/red] {exc}")
+        return 1
+
+    table = Table(title="LLM calls")
+    for column in ("purpose", "attempt", "latency ms", "prompt tok", "completion tok"):
+        table.add_column(column)
+    for call in llm.calls:
+        table.add_row(
+            call.purpose,
+            str(call.attempt),
+            str(call.latency_ms),
+            str(call.prompt_tokens),
+            str(call.completion_tokens),
+        )
+    console.print(table)
+    return 0

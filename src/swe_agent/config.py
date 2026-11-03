@@ -18,7 +18,11 @@ class Settings(BaseSettings):
 
     # --- LLM (Groq) ---
     groq_api_key: SecretStr = SecretStr("")
-    groq_model: str = "llama-3.3-70b-versatile"  # check Groq console for current names
+    groq_model: str = "openai/gpt-oss-20b"  # check Groq console for current names
+    llm_timeout_seconds: int = Field(default=60, ge=5, le=300)
+    llm_max_retries: int = Field(default=3, ge=1, le=6)
+    llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
+    llm_max_output_tokens: int = Field(default=2048, ge=256, le=8192)
 
     # --- GitHub (optional, only needed for private repos / higher rate limits) ---
     github_token: SecretStr = SecretStr("")

@@ -73,10 +73,71 @@ def main() -> None:
         raise SystemExit(llm_test())
     if command == "prepare":
         raise SystemExit(prepare(args[1:]))
+    if command == "scan":
+        raise SystemExit(scan(args[1:]))
     if command == "clean":
         raise SystemExit(clean(args[1:]))
+    
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+def scan(args: list[str]) -> int:
+    """Scan and chunk a prepared workspace: swe-agent scan <run_id>"""
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.indexing import build_chunks, save_chunks
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent scan <run_id>")
+        return 2
+    try:
+        workspace = WorkspaceManager(settings).get(args[0])
+    except WorkspaceError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+
+    result = build_chunks(workspace.repo_dir, settings)
+    out_file = workspace.root / "chunks.jsonl"
+    save_chunks(result.chunks, out_file)
+
+    table = Table(title="Scan summary")
+    table.add_column("Item")
+    table.add_column("Value")
+    table.add_row("Files kept", str(len(result.scan.files)))
+    table.add_row("Chunks", str(len(result.chunks)))
+    langs = ", ".join(f"{k}:{v}" for k, v in result.scan.language_counts().items())
+    table.add_row("Languages", langs or "-")
+    skipped = ", ".join(f"{k}:{v}" for k, v in sorted(result.skipped.items()))
+    table.add_row("Skipped", skipped or "-")
+    table.add_row("Hit file limit", str(result.scan.truncated))
+    table.add_row("Saved to", str(out_file))
+    console.print(table)
+
+    chunk_table = Table(title="Chunks")
+    for column in ("citation", "kind", "name", "lines"):
+        chunk_table.add_column(column)
+    for chunk in result.chunks[:15]:
+        chunk_table.add_row(
+            chunk.citation.label,
+            chunk.kind.value,
+            chunk.name or "-",
+            str(chunk.end_line - chunk.start_line + 1),
+        )
+    console.print(chunk_table)
+
+    for chunk in result.chunks:
+        if chunk.kind.value in ("function", "method"):
+            syntax = Syntax(
+                chunk.text, "python", line_numbers=True, start_line=chunk.start_line
+            )
+            console.print(Panel(syntax, title=chunk.citation.label))
+            break
+    return 0
 
 def prepare(args: list[str]) -> int:
     """Fetch an issue, clone its repo into a fresh workspace, and print a summary."""

@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     clone_timeout_seconds: int = Field(default=180, ge=10, le=900)
     max_repo_size_mb: int = Field(default=200, ge=1, le=2000)
 
+        # --- Scanning / chunking ---
+    max_file_kb: int = Field(default=256, ge=1, le=2048)
+    max_scan_files: int = Field(default=3000, ge=1, le=50000)
+    chunk_max_lines: int = Field(default=60, ge=10, le=300)
+    chunk_overlap_lines: int = Field(default=10, ge=0, le=50)
+
     # --- Logging ---
     log_level: str = "INFO"
 

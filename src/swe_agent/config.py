@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     embedding_max_seq_length: int = Field(default=512, ge=32, le=1024)
     default_top_k: int = Field(default=8, ge=1, le=50)
 
+        # --- Hybrid retrieval / reranking ---
+    retrieval_candidates: int = Field(default=30, ge=5, le=200)  # per retriever
+    rrf_k: int = Field(default=60, ge=1, le=200)
+    reranker_backend: Literal["cross-encoder", "overlap", "none"] = "cross-encoder"
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rerank_top_n: int = Field(default=20, ge=1, le=100)  # how many go to the reranker
+    
     # --- Logging ---
     log_level: str = "INFO"
 

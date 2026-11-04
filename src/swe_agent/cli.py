@@ -81,9 +81,146 @@ def main() -> None:
         raise SystemExit(index(args[1:]))
     if command == "search":
         raise SystemExit(search(args[1:]))
+
+    if command == "retrieve":
+        raise SystemExit(retrieve(args[1:]))
+    if command == "compare":
+        raise SystemExit(compare(args[1:]))
     
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+def retrieve(args: list[str]) -> int:
+    """Hybrid retrieval.
+
+    swe-agent retrieve <run_id> [--mode vector|bm25|hybrid]
+      [--no-rerank] <question>
+    """
+    from rich.markup import escape
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.indexing import IndexingError
+    from swe_agent.retrieval import build_retriever, verify_chunk
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    usage = (
+        "Usage: swe-agent retrieve <run_id> "
+        '[--mode vector|bm25|hybrid] [--no-rerank] "question"'
+    )
+    if len(args) < 2:
+        console.print(usage)
+        return 2
+
+    run_id, rest = args[0], args[1:]
+    mode, use_rerank, words = "hybrid", True, []
+    position = 0
+    while position < len(rest):
+        if rest[position] == "--mode" and position + 1 < len(rest):
+            mode = rest[position + 1]
+            position += 2
+        elif rest[position] == "--no-rerank":
+            use_rerank = False
+            position += 1
+        else:
+            words.append(rest[position])
+            position += 1
+    if mode not in ("vector", "bm25", "hybrid") or not words:
+        console.print(usage)
+        return 2
+    query = " ".join(words)
+
+    try:
+        workspace = WorkspaceManager(settings).get(run_id)
+        retriever = build_retriever(workspace.run_id, workspace.root, settings)
+    except (WorkspaceError, IndexingError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    try:
+        result = retriever.retrieve(query, mode=mode, rerank=use_rerank)
+    except (IndexingError, ValueError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        retriever.close()
+
+    table = Table(title=f"{result.mode} results for: {escape(query)}")
+    for column in ("#", "citation", "kind", "name", "score", "vec", "bm25", "on disk"):
+        table.add_column(column)
+    for rank, hit in enumerate(result.hits, start=1):
+        is_on_disk = verify_chunk(workspace.repo_dir, hit.chunk)
+        on_disk = "[green]yes[/green]" if is_on_disk else "[red]NO[/red]"
+        table.add_row(
+            str(rank),
+            hit.chunk.citation.label,
+            hit.chunk.kind.value,
+            hit.chunk.name or "-",
+            f"{hit.score:.3f}",
+            str(hit.vector_rank or "-"),
+            str(hit.bm25_rank or "-"),
+            on_disk,
+        )
+    console.print(table)
+    timing_text = ", ".join(f"{k}={v}" for k, v in result.timings_ms.items())
+    console.print(f"reranked: {result.reranked} | {timing_text}")
+
+    if result.hits:
+        best = result.hits[0].chunk
+        syntax = Syntax(best.text, best.language, line_numbers=True, start_line=best.start_line)
+        console.print(Panel(syntax, title=f"Best match: {best.citation.label}"))
+    return 0
+
+
+def compare(args: list[str]) -> int:
+    """Compare four retrieval methods: swe-agent compare <run_id> <question>"""
+    from rich.markup import escape
+
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.indexing import IndexingError
+    from swe_agent.retrieval import build_retriever
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) < 2:
+        console.print('Usage: swe-agent compare <run_id> "question"')
+        return 2
+    run_id, query = args[0], " ".join(args[1:])
+
+    try:
+        workspace = WorkspaceManager(settings).get(run_id)
+        retriever = build_retriever(workspace.run_id, workspace.root, settings)
+    except (WorkspaceError, IndexingError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+
+    configs = [
+        ("vector only", "vector", False),
+        ("BM25 only", "bm25", False),
+        ("hybrid (RRF)", "hybrid", False),
+        ("hybrid + rerank", "hybrid", True),
+    ]
+    table = Table(title=f"Top 3 per method for: {escape(query)}")
+    table.add_column("Method")
+    table.add_column("Top 3 citations")
+    try:
+        for label, mode, use_rerank in configs:
+            result = retriever.retrieve(query, k=3, mode=mode, rerank=use_rerank)
+            lines = [
+                escape(h.chunk.citation.label + (f"  {h.chunk.name}" if h.chunk.name else ""))
+                for h in result.hits
+            ]
+            table.add_row(label, "\n".join(lines) or "(no results)")
+    except (IndexingError, ValueError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        retriever.close()
+    console.print(table)
+    return 0
 
 def index(args: list[str]) -> int:
     """Embed a workspace's chunks and store them in Qdrant: swe-agent index <run_id>"""

@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -50,6 +51,12 @@ class Settings(BaseSettings):
     max_scan_files: int = Field(default=3000, ge=1, le=50000)
     chunk_max_lines: int = Field(default=60, ge=10, le=300)
     chunk_overlap_lines: int = Field(default=10, ge=0, le=50)
+
+        # --- Embeddings / vector search ---
+    embedding_backend: Literal["sentence-transformers", "hashing"] = "sentence-transformers"
+    embedding_batch_size: int = Field(default=32, ge=1, le=256)
+    embedding_max_seq_length: int = Field(default=512, ge=32, le=1024)
+    default_top_k: int = Field(default=8, ge=1, le=50)
 
     # --- Logging ---
     log_level: str = "INFO"

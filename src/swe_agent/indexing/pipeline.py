@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections import Counter
 from pathlib import Path
@@ -80,4 +79,4 @@ def save_chunks(chunks: list[CodeChunk], path: Path) -> None:
 
 def load_chunks(path: Path) -> list[CodeChunk]:
     with open(path, encoding="utf-8") as handle:
-        return [json.loads(line) and CodeChunk.model_validate_json(line) for line in handle]
+        return [CodeChunk.model_validate_json(line) for line in handle if line.strip()]

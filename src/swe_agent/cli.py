@@ -77,9 +77,139 @@ def main() -> None:
         raise SystemExit(scan(args[1:]))
     if command == "clean":
         raise SystemExit(clean(args[1:]))
+    if command == "index":
+        raise SystemExit(index(args[1:]))
+    if command == "search":
+        raise SystemExit(search(args[1:]))
     
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+def index(args: list[str]) -> int:
+    """Embed a workspace's chunks and store them in Qdrant: swe-agent index <run_id>"""
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.indexing import (
+        IndexingError,
+        QdrantStore,
+        build_chunks,
+        collection_for,
+        get_embedder,
+        index_chunks,
+        load_chunks,
+        save_chunks,
+    )
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent index <run_id>")
+        return 2
+    try:
+        workspace = WorkspaceManager(settings).get(args[0])
+    except WorkspaceError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+
+    chunks_file = workspace.root / "chunks.jsonl"
+    if chunks_file.exists():
+        chunks = load_chunks(chunks_file)
+    else:
+        chunks = build_chunks(workspace.repo_dir, settings).chunks
+        save_chunks(chunks, chunks_file)
+
+    console.print("Embedding chunks. The first run downloads the model (about 130 MB)...")
+    embedder = get_embedder(settings)
+    store = QdrantStore(settings)
+    try:
+        stats = index_chunks(
+            chunks,
+            collection=collection_for(workspace.run_id),
+            embedder=embedder,
+            store=store,
+            batch_size=settings.embedding_batch_size,
+        )
+    except IndexingError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        store.close()
+
+    table = Table(title="Index built")
+    table.add_column("Item")
+    table.add_column("Value")
+    table.add_row("Collection", stats.collection)
+    table.add_row("Chunks stored", str(stats.chunk_count))
+    table.add_row("Vector size", str(stats.vector_dim))
+    table.add_row("Embedding model", stats.embedding_model)
+    table.add_row("Seconds", str(stats.seconds))
+    console.print(table)
+    return 0
+
+
+def search(args: list[str]) -> int:
+    """Semantic search: swe-agent search <run_id> <question words...>"""
+    from rich.markup import escape
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.indexing import (
+        IndexingError,
+        QdrantStore,
+        collection_for,
+        get_embedder,
+        vector_search,
+    )
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) < 2:
+        console.print('Usage: swe-agent search <run_id> "your question"')
+        return 2
+    run_id, query = args[0], " ".join(args[1:])
+    try:
+        workspace = WorkspaceManager(settings).get(run_id)
+    except WorkspaceError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+
+    store = QdrantStore(settings)
+    try:
+        hits = vector_search(
+            query,
+            collection=collection_for(workspace.run_id),
+            embedder=get_embedder(settings),
+            store=store,
+            k=settings.default_top_k,
+        )
+    except (IndexingError, ValueError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        store.close()
+
+    table = Table(title=f"Top {len(hits)} results for: {escape(query)}")
+    for column in ("#", "citation", "kind", "name", "score", "first line"):
+        table.add_column(column)
+    for rank, hit in enumerate(hits, start=1):
+        first_line = next((ln.strip() for ln in hit.chunk.text.splitlines() if ln.strip()), "")
+        table.add_row(
+            str(rank),
+            hit.chunk.citation.label,
+            hit.chunk.kind.value,
+            hit.chunk.name or "-",
+            f"{hit.score:.3f}",
+            escape(first_line[:60]),
+        )
+    console.print(table)
+
+    if hits:
+        best = hits[0].chunk
+        syntax = Syntax(best.text, best.language, line_numbers=True, start_line=best.start_line)
+        console.print(Panel(syntax, title=f"Best match: {best.citation.label}"))
+    return 0
 
 def scan(args: list[str]) -> int:
     """Scan and chunk a prepared workspace: swe-agent scan <run_id>"""
@@ -203,6 +333,19 @@ def clean(args: list[str]) -> int:
     except WorkspaceError as exc:
         console.print(f"[red]Failed:[/red] {exc}")
         return 1
+
+    # Also remove this run's vectors (best effort).
+    try:
+        from swe_agent.indexing import QdrantStore, collection_for
+
+        store = QdrantStore(settings)
+        try:
+            store.delete_collection(collection_for(args[0]))
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not delete vectors: %s", exc)
+
     console.print(f"[green]Deleted workspace {args[0]}[/green]")
     return 0
 

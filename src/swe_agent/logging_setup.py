@@ -1,22 +1,15 @@
 """Logging setup with automatic secret redaction."""
 
 import logging
-import re
 import sys
-
-# Patterns of common secret formats. If one appears in a log, we hide it.
-_SECRET_PATTERNS = [
-    re.compile(r"gsk_[A-Za-z0-9]{20,}"),          # Groq keys
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),    # GitHub tokens
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),  # GitHub fine-grained tokens
-]
 
 
 def redact_secrets(text: str) -> str:
     """Replace anything that looks like a secret with [REDACTED]."""
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub("[REDACTED]", text)
-    return text
+    # Imported here so logging starts fast and no import cycle can form.
+    from swe_agent.security.secrets import redact
+
+    return redact(text)
 
 
 class SecretRedactingFilter(logging.Filter):

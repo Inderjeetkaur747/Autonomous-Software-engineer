@@ -86,9 +86,108 @@ def main() -> None:
         raise SystemExit(retrieve(args[1:]))
     if command == "compare":
         raise SystemExit(compare(args[1:]))
+    if command == "guard":
+        raise SystemExit(guard(args[1:]))
     
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+
+def guard(args: list[str]) -> int:
+    """Attack your own guards by hand.
+
+    swe-agent guard cmd "<command>"
+    swe-agent guard path <run_id> <relative-path> [--write]
+    swe-agent guard text "<some text>"
+    swe-agent guard scan <run_id>
+    """
+    from rich.markup import escape
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    sub = args[0] if args else ""
+
+    if sub == "cmd" and len(args) >= 2:
+        from swe_agent.security import CommandNotAllowed, validate_command
+
+        command = args[1] if len(args) == 2 else args[1:]
+        try:
+            allowed = validate_command(command)
+        except CommandNotAllowed as exc:
+            console.print(f"[red]DENIED:[/red] {escape(str(exc))}")
+            return 1
+        console.print(f"[green]ALLOWED[/green] ({allowed.kind}): {escape(' '.join(allowed.argv))}")
+        return 0
+
+    if sub == "path" and len(args) >= 3:
+        from swe_agent.github import WorkspaceError, WorkspaceManager
+        from swe_agent.security import PathGuard, PathSecurityError
+
+        try:
+            workspace = WorkspaceManager(settings).get(args[1])
+            rel, full = PathGuard(workspace.repo_dir).check(args[2], write="--write" in args[3:])
+        except WorkspaceError as exc:
+            console.print(f"[red]Failed:[/red] {exc}")
+            return 1
+        except PathSecurityError as exc:
+            console.print(f"[red]DENIED:[/red] {escape(str(exc))}")
+            return 1
+        console.print(f"[green]ALLOWED[/green] {escape(rel)} -> {escape(str(full))}")
+        return 0
+
+    if sub == "text" and len(args) >= 2:
+        from swe_agent.security import redact, scan_for_injection, scan_text
+
+        text = " ".join(args[1:])
+        secrets = scan_text(text)
+        report = scan_for_injection(text)
+        table = Table(title=f"Findings (injection risk: {report.risk})")
+        for column in ("type", "what", "line", "detail"):
+            table.add_column(column)
+        for s in secrets:
+            table.add_row("secret", s.kind, str(s.line), escape(s.preview))
+        for i in report.findings:
+            table.add_row("injection", f"{i.name} ({i.severity})", str(i.line), escape(i.excerpt))
+        console.print(table)
+        console.print(f"Redacted text: {escape(redact(text))}")
+        return 0
+
+    if sub == "scan" and len(args) == 2:
+        from swe_agent.github import WorkspaceError, WorkspaceManager
+        from swe_agent.indexing import load_chunks
+        from swe_agent.security import scan_for_injection, scan_text
+
+        try:
+            workspace = WorkspaceManager(settings).get(args[1])
+        except WorkspaceError as exc:
+            console.print(f"[red]Failed:[/red] {exc}")
+            return 1
+        chunks_file = workspace.root / "chunks.jsonl"
+        if not chunks_file.exists():
+            console.print(f"[red]Failed:[/red] run first: swe-agent scan {args[1]}")
+            return 1
+        rows: list[tuple[str, str, str, str]] = []
+        for chunk in load_chunks(chunks_file):
+            for s in scan_text(chunk.text):
+                where = f"{chunk.file_path}:{chunk.start_line + s.line - 1}"
+                rows.append(("secret", s.kind, where, s.preview))
+            for i in scan_for_injection(chunk.text).findings:
+                where = f"{chunk.file_path}:{chunk.start_line + i.line - 1}"
+                rows.append(("injection", f"{i.name} ({i.severity})", where, i.excerpt))
+        table = Table(title=f"Repository security scan: {len(rows)} finding(s)")
+        for column in ("type", "what", "where", "detail"):
+            table.add_column(column)
+        for row in rows[:40]:
+            table.add_row(*(escape(cell) for cell in row))
+        console.print(table)
+        return 0
+
+    console.print(
+        'Usage: swe-agent guard cmd "<command>" | path <run_id> <path> [--write] '
+        '| text "<text>" | scan <run_id>'
+    )
+    return 2
 
 def retrieve(args: list[str]) -> int:
     """Hybrid retrieval.

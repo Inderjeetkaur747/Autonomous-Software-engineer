@@ -1,4 +1,6 @@
 """Prompt templates. Keeping prompts in one file makes them easy to review and test."""
+from swe_agent.security.injection import clean_untrusted_text
+from swe_agent.security.secrets import redact
 
 MAX_UNTRUSTED_CHARS = 8000
 
@@ -6,10 +8,11 @@ MAX_UNTRUSTED_CHARS = 8000
 def wrap_untrusted(label: str, text: str, max_chars: int = MAX_UNTRUSTED_CHARS) -> str:
     """Put outside text inside tags, so the model treats it as data.
 
-    We also cut it to a maximum length and break any fake closing tag,
-    so the text cannot 'escape' from its box.
+    Steps: remove hidden characters and fake tags, hide secrets, cut to a maximum
+    length, and break any fake closing tag so the text cannot 'escape' its box.
+    Secrets are hidden BEFORE cutting, so a cut can never leave half a key.
     """
-    text = text[:max_chars]
+    text = redact(clean_untrusted_text(text))[:max_chars]
     text = text.replace(f"</{label}>", f"<\\/{label}>")
     return f"<{label}>\n{text}\n</{label}>"
 

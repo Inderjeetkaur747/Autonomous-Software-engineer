@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     reranker_backend: Literal["cross-encoder", "overlap", "none"] = "cross-encoder"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rerank_top_n: int = Field(default=20, ge=1, le=100)  # how many go to the reranker
+
+        # --- Security policy ---
+    max_files_changed: int = Field(default=10, ge=1, le=50)
+    max_patch_kb: int = Field(default=200, ge=1, le=2000)
+    max_edit_kb: int = Field(default=128, ge=1, le=1024)
     
     # --- Logging ---
     log_level: str = "INFO"

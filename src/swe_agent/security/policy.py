@@ -34,7 +34,7 @@ class PolicyReport:
         self.violations.append(Violation(code, message, severity))
 
 
-def _is_test_path(rel: str) -> bool:
+def is_test_path(rel: str) -> bool:
     parts = rel.lower().split("/")
     name = parts[-1]
     return (
@@ -68,7 +68,7 @@ class SecurityPolicy:
             elif step.action == PlanAction.CREATE:
                 if exists:
                     report.add("already_exists", f"{label}: {rel} already exists.")
-                if not _is_test_path(rel):
+                if not is_test_path(rel):
                     report.add("create_not_test", f"{label}: new files are only allowed for tests.")
             elif step.action == PlanAction.DELETE:
                 if not exists:

@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     max_files_changed: int = Field(default=10, ge=1, le=50)
     max_patch_kb: int = Field(default=200, ge=1, le=2000)
     max_edit_kb: int = Field(default=128, ge=1, le=1024)
+
+        # --- Tools ---
+    max_tool_calls: int = Field(default=80, ge=1, le=1000)
+    tool_output_max_chars: int = Field(default=6000, ge=500, le=50000)
+    read_max_lines: int = Field(default=200, ge=10, le=2000)
+
+        # Use only the locally cached models; never contact Hugging Face.
+    models_offline: bool = False
     
     # --- Logging ---
     log_level: str = "INFO"

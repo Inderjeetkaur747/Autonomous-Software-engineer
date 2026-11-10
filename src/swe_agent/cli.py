@@ -88,9 +88,128 @@ def main() -> None:
         raise SystemExit(compare(args[1:]))
     if command == "guard":
         raise SystemExit(guard(args[1:]))
-    
+    if command == "tool":
+        raise SystemExit(tool(args[1:]))
+    if command == "mcp-demo":
+        raise SystemExit(mcp_demo(args[1:]))
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+
+def tool(args: list[str]) -> int:
+    """Call a tool directly (no MCP).
+
+    swe-agent tool <run_id>                      list the tools
+    swe-agent tool <run_id> <tool> key=value ... call one tool
+    """
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.tools import CodeSearcher, RepoTools
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if not args:
+        console.print("Usage: swe-agent tool <run_id> [<tool> [key=value ...]]")
+        return 2
+    try:
+        workspace = WorkspaceManager(settings).get(args[0])
+    except WorkspaceError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    tools = RepoTools(
+        workspace.repo_dir,
+        settings=settings,
+        searcher=CodeSearcher(workspace.run_id, workspace.root, settings),
+    )
+
+    if len(args) == 1:
+        table = Table(title="Available tools")
+        for column in ("tool", "group", "description"):
+            table.add_column(column)
+        for spec in tools.specs():
+            table.add_row(
+                spec.name, "explore" if spec.explore else "change/run", spec.description[:80]
+            )
+        console.print(table)
+        return 0
+
+    arguments: dict[str, str] = {}
+    for item in args[2:]:
+        key, separator, value = item.partition("=")
+        if not separator or not key:
+            console.print(f"[red]Bad argument {item!r}. Use key=value.[/red]")
+            return 2
+        arguments[key] = value  # Pydantic turns "5" into 5 and "true" into True
+
+    result = tools.call(args[1], arguments)
+    if result.ok:
+        console.print(result.output, markup=False, highlight=False)
+    else:
+        console.print(f"REFUSED/FAILED: {result.error}", style="red", markup=False)
+    for warning in result.warnings:
+        console.print(f"WARNING: {warning}", style="yellow", markup=False)
+    return 0 if result.ok else 1
+
+
+def mcp_demo(args: list[str]) -> int:
+    """Use the tools through a real MCP server: swe-agent mcp-demo <run_id>"""
+    import asyncio
+
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.mcp_layer import McpToolClient
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent mcp-demo <run_id>")
+        return 2
+    try:
+        WorkspaceManager(settings).get(args[0])
+    except WorkspaceError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+
+    steps = [
+        ("list_files", {}),
+        ("read_file", {"path": "mathkit/stats.py"}),
+        ("grep", {"pattern": "len("}),
+        ("search_code", {"query": "average crashes on an empty list", "k": 3}),
+        # The server runs in explore-only mode, so this MUST be refused:
+        ("edit_file", {"path": "mathkit/stats.py", "old_str": "len(numbers)", "new_str": "1"}),
+    ]
+
+    async def run() -> None:
+        async with McpToolClient(args[0], explore_only=True) as client:
+            specs = await client.list_tools()
+            console.print(f"Server offers {len(specs)} tools: {', '.join(s.name for s in specs)}")
+            for name, arguments in steps:
+                result = await client.call_tool(name, arguments)
+                body = result.output if result.ok else f"REFUSED: {result.error}"
+                console.print(
+                    Panel(
+                        Text(body[:1200]),
+                        title=f"{name}: {'ok' if result.ok else 'refused'}",
+                        border_style="green" if result.ok else "red",
+                    )
+                )
+            table = Table(title="Client-side tool log")
+            for column in ("#", "tool", "ok", "ms"):
+                table.add_column(column)
+            for rec in client.calls:
+                table.add_row(str(rec.seq), rec.tool, "yes" if rec.ok else "no",
+                              str(rec.duration_ms))
+            console.print(table)
+
+    try:
+        asyncio.run(run())
+    except Exception as exc:
+        console.print(f"[red]MCP demo failed:[/red] {exc}")
+        return 1
+    return 0
 
 
 def guard(args: list[str]) -> int:

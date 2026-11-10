@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from typing import TextIO
 
 
 def redact_secrets(text: str) -> str:
@@ -21,9 +22,9 @@ class SecretRedactingFilter(logging.Filter):
         return True
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(level: str = "INFO", stream: TextIO | None = None) -> None:
     """Configure the root logger once, at application start."""
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(stream or sys.stdout)
     handler.setFormatter(
         logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
     )

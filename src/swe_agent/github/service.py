@@ -34,6 +34,7 @@ class PreparedRun:
 def prepare_run(
     issue_ref: IssueRef,
     *,
+    run_id: str | None = None,
     settings: Settings | None = None,
     github: Any | None = None,
     workspaces: WorkspaceManager | None = None,
@@ -61,7 +62,7 @@ def prepare_run(
         )
 
     # 3) Create the workspace and clone. If anything fails, clean up.
-    workspace = workspaces.create()
+    workspace = workspaces.create(run_id)
     branch = f"agent/issue-{issue_ref.number}"
     try:
         head_sha = cloner(

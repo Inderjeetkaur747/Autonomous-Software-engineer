@@ -83,3 +83,16 @@ def test_failed_clone_removes_the_workspace(tmp_path):
             REF, settings=settings, github=FakeGitHub(), workspaces=manager, cloner=broken_cloner
         )
     assert list(manager.base.iterdir()) == []
+
+def test_caller_can_choose_the_run_id(tmp_path):
+    settings, manager = make_env(tmp_path)
+
+    def fake_cloner(repo, dest, *, work_branch, token, timeout):
+        dest.mkdir(parents=True)
+        return "abc123"
+
+    run = prepare_run(
+        REF, settings=settings, github=FakeGitHub(), workspaces=manager,
+        cloner=fake_cloner, run_id="abcdef012345",
+    )
+    assert run.workspace.run_id == "abcdef012345"

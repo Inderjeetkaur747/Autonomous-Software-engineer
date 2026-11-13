@@ -94,8 +94,217 @@ def main() -> None:
 
     if command == "plan":
         raise SystemExit(plan(args[1:]))
+    if command == "run":
+        raise SystemExit(run_agent(args[1:]))
+    if command == "status":
+        raise SystemExit(run_status(args[1:]))
+    if command == "decide":
+        raise SystemExit(decide(args[1:]))
+    if command == "graph":
+        raise SystemExit(graph_text(args[1:]))
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+
+_STATUS_COLORS = {
+    "plan_approved": "green",
+    "plan_ready": "yellow",
+    "needs_clarification": "yellow",
+    "failed": "red",
+    "blocked": "red",
+    "rejected": "red",
+    "revision_limit": "red",
+}
+
+
+def _show_run(console: Console, st) -> None:
+    """Print a run: status, events, and (if paused) the plan the human must review."""
+    from rich.markup import escape
+    from rich.panel import Panel
+
+    color = _STATUS_COLORS.get(st.status, "white")
+    console.print(
+        f"Run {st.run_id} | status: [{color}]{st.status}[/{color}] | "
+        f"waiting for human: {st.paused} | revisions used: {st.plan_revisions}"
+    )
+    if st.error:
+        console.print(f"[red]Error:[/red] {escape(st.error)}")
+
+    events = Table(title="Workflow events")
+    for column in ("node", "what happened", "time"):
+        events.add_column(column)
+    for item in st.events:
+        events.add_row(item["node"], escape(item["detail"]), item["at"])
+    console.print(events)
+
+    planning = st.planning or {}
+    for message in planning.get("policy_violations", []):
+        console.print(f"[red]Policy block:[/red] {escape(message)}")
+    questions = ((planning.get("analysis") or {}).get("clarification_questions")) or []
+    if st.status == "needs_clarification" and questions:
+        console.print(Panel(escape("\n".join(f"- {q}" for q in questions)), title="Questions"))
+    if st.approved_files:
+        console.print(f"[green]Approved files:[/green] {escape(', '.join(st.approved_files))}")
+
+    if not st.paused:
+        return
+    a = st.approval
+    analysis, plan_data = a.get("analysis") or {}, a.get("plan") or {}
+    console.print(
+        Panel(
+            escape(
+                f"{analysis.get('summary', '')}\n"
+                f"Root cause (hypothesis): {analysis.get('root_cause_hypothesis', '')}"
+            ),
+            title="Analysis",
+        )
+    )
+    table = Table(title=f"Plan: {escape(str(plan_data.get('goal', '')))}")
+    for column in ("step", "action", "file", "what"):
+        table.add_column(column)
+    for step in plan_data.get("steps", []):
+        table.add_row(
+            str(step["step_number"]),
+            str(step["action"]),
+            escape(step["file_path"]),
+            escape(step["description"]),
+        )
+    console.print(table)
+    console.print(f"Test strategy: {escape(str(plan_data.get('test_strategy', '')))}")
+    console.print(f"Files an approval would allow: {escape(', '.join(a.get('files_in_scope', [])))}")  # noqa: E501
+    console.print(f"Issue injection risk: {a.get('injection_risk')}")
+    for flag in a.get("injection_flags", []):
+        console.print(f"[yellow]Issue flag:[/yellow] {escape(flag)}")
+    for label in a.get("citations_invalid", []):
+        console.print(f"[red]Invalid citation removed:[/red] {escape(label)}")
+    for message in [*a.get("policy_warnings", []), *a.get("notes", [])]:
+        console.print(f"[yellow]Note:[/yellow] {escape(message)}")
+    console.print(f"Plan hash: {a.get('plan_hash')}   revisions left: {a.get('revisions_left')}")
+    console.print(
+        f'Decide with:  swe-agent decide {st.run_id} approve | reject | revise "your feedback"'
+    )
+
+
+def _open_runner(settings):
+    from swe_agent.agent import AgentRunner, make_default_deps, open_checkpointer
+
+    saver = open_checkpointer(settings)
+    return AgentRunner(make_default_deps(settings), saver), saver
+
+
+def run_agent(args: list[str]) -> int:
+    """Start a run: swe-agent run <owner/repo> <issue-number> [--run-id ID]"""
+    from swe_agent.agent import WorkflowError, close_checkpointer
+    from swe_agent.github import InvalidGitHubUrl
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    positional, run_id, position = [], None, 0
+    while position < len(args):
+        if args[position] == "--run-id" and position + 1 < len(args):
+            run_id = args[position + 1]
+            position += 2
+        else:
+            positional.append(args[position])
+            position += 1
+    if len(positional) != 2 or not positional[1].isdigit():
+        console.print("Usage: swe-agent run <owner/repo> <issue-number> [--run-id ID]")
+        return 2
+
+    runner, saver = _open_runner(settings)
+    try:
+        console.print("Running: clone, index, plan. This can take a minute or two...")
+        status = runner.start(positional[0], int(positional[1]), run_id)
+    except (InvalidGitHubUrl, WorkflowError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        close_checkpointer(saver)
+    _show_run(console, status)
+    return 0 if status.paused or status.status == "plan_approved" else 1
+
+
+def run_status(args: list[str]) -> int:
+    """Show a run (also after a restart): swe-agent status <run_id>"""
+    from swe_agent.agent import WorkflowError, close_checkpointer
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent status <run_id>")
+        return 2
+    runner, saver = _open_runner(settings)
+    try:
+        status = runner.status(args[0])
+    except WorkflowError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        close_checkpointer(saver)
+    _show_run(console, status)
+    return 0
+
+
+def decide(args: list[str]) -> int:
+    """Answer the approval question.
+
+    swe-agent decide <run_id> approve|reject|revise ["feedback"] [--plan-hash=HASH]
+    """
+    from pydantic import ValidationError
+
+    from swe_agent.agent import WorkflowError, close_checkpointer
+    from swe_agent.schemas.workflow import PlanDecision
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) < 2:
+        console.print('Usage: swe-agent decide <run_id> approve|reject|revise ["feedback"]')
+        return 2
+    plan_hash_value = next((a.split("=", 1)[1] for a in args if a.startswith("--plan-hash=")), "")
+    words = [a for a in args[2:] if not a.startswith("--plan-hash=")]
+    try:
+        decision = PlanDecision(
+            action=args[1], feedback=" ".join(words), plan_hash=plan_hash_value
+        )
+    except ValidationError as exc:
+        console.print(f"[red]Invalid decision:[/red] {exc.errors()[0]['msg']}")
+        return 2
+
+    runner, saver = _open_runner(settings)
+    try:
+        if decision.action == "revise":
+            console.print("Planning again with your feedback. This can take about a minute...")
+        status = runner.decide(args[0], decision)
+    except WorkflowError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        close_checkpointer(saver)
+    _show_run(console, status)
+    return 0
+
+
+def graph_text(_args: list[str]) -> int:
+    """Print the workflow as a Mermaid diagram: swe-agent graph"""
+    from swe_agent.agent import (
+        AgentRunner,
+        close_checkpointer,
+        make_default_deps,
+        open_checkpointer,
+    )
+
+    settings = get_settings()
+    saver = open_checkpointer(settings)
+    try:
+        text = AgentRunner(make_default_deps(settings), saver).mermaid()
+    finally:
+        close_checkpointer(saver)
+    Console().print(text, markup=False, highlight=False)
+    return 0
+
 
 def plan(args: list[str]) -> int:
     """Analyse the issue and write an implementation plan: swe-agent plan <run_id>"""

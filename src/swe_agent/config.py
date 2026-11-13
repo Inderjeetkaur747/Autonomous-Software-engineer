@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     max_explore_steps: int = Field(default=6, ge=1, le=15)
     explore_result_chars: int = Field(default=2500, ge=500, le=6000)
     max_plan_attempts: int = Field(default=2, ge=1, le=4)
+
+        # --- Workflow ---
+    checkpoint_path: Path = Path("data/checkpoints.sqlite")
+    max_plan_revisions: int = Field(default=2, ge=0, le=5)
     
     # --- Logging ---
     log_level: str = "INFO"

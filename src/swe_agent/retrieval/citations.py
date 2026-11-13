@@ -69,13 +69,17 @@ def _iter_citations(text: str) -> Iterator[tuple[str, int, int]]:
         yield path, start, end
 
 
-def check_answer_citations(text: str, hits: list[SearchHit]) -> CitationCheck:
-    """A citation is valid only if EVERY cited line was inside a chunk we retrieved."""
+def shown_lines(hits: list[SearchHit]) -> dict[str, set[int]]:
+    """Which lines of which files did we show the model?"""
     shown: dict[str, set[int]] = {}
     for hit in hits:
         c = hit.chunk
         shown.setdefault(c.file_path, set()).update(range(c.start_line, c.end_line + 1))
+    return shown
 
+
+def check_citations_in_lines(text: str, shown: dict[str, set[int]]) -> CitationCheck:
+    """A citation is valid only if EVERY cited line is in `shown`."""
     result = CitationCheck()
     for path, start, end in _iter_citations(text):
         label = f"{path}:{start}-{end}"
@@ -85,6 +89,11 @@ def check_answer_citations(text: str, hits: list[SearchHit]) -> CitationCheck:
         if label not in bucket:
             bucket.append(label)
     return result
+
+
+def check_answer_citations(text: str, hits: list[SearchHit]) -> CitationCheck:
+    """Same check, when the shown lines come from retrieved hits."""
+    return check_citations_in_lines(text, shown_lines(hits))
 
 
 # -------------------------------------------------------------- 3. disk check

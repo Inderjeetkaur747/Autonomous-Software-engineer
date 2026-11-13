@@ -81,7 +81,6 @@ def main() -> None:
         raise SystemExit(index(args[1:]))
     if command == "search":
         raise SystemExit(search(args[1:]))
-
     if command == "retrieve":
         raise SystemExit(retrieve(args[1:]))
     if command == "compare":
@@ -92,8 +91,114 @@ def main() -> None:
         raise SystemExit(tool(args[1:]))
     if command == "mcp-demo":
         raise SystemExit(mcp_demo(args[1:]))
+
+    if command == "plan":
+        raise SystemExit(plan(args[1:]))
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+def plan(args: list[str]) -> int:
+    """Analyse the issue and write an implementation plan: swe-agent plan <run_id>"""
+    from rich.markup import escape
+    from rich.panel import Panel
+
+    from swe_agent.agent import PlanningError, load_issue, plan_issue
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.llm import GroqLLM, LLMError
+    from swe_agent.tools import EXPLORE_TOOLS, CodeSearcher, RepoTools
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent plan <run_id>")
+        return 2
+    try:
+        workspace = WorkspaceManager(settings).get(args[0])
+        issue = load_issue(workspace.root)
+        llm = GroqLLM(settings)
+    except (WorkspaceError, PlanningError, LLMError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+
+    searcher = CodeSearcher(workspace.run_id, workspace.root, settings)
+    tools = RepoTools(
+        workspace.repo_dir,
+        settings=settings,
+        searcher=searcher,
+        allowed_tools=EXPLORE_TOOLS,  # exploring only
+        write_paths=[],  # and nothing may be changed
+    )
+    console.print("Exploring the repository and planning. This can take 20 to 60 seconds...")
+    try:
+        result = plan_issue(issue=issue, tools=tools, llm=llm, searcher=searcher, settings=settings)
+    except LLMError as exc:
+        console.print(f"[red]LLM error:[/red] {escape(str(exc))}")
+        return 1
+
+    color = {"ready": "green", "needs_clarification": "yellow", "blocked": "red"}[
+        result.status.value
+    ]
+    console.print(
+        f"Status: [{color}]{result.status.value}[/{color}] | issue injection risk: "
+        f"{result.injection_risk} | LLM calls: {result.llm_calls} | tokens: "
+        f"{result.total_tokens} | {result.seconds}s | explore stopped: {result.explore_stopped}"
+    )
+    for flag in result.injection_flags:
+        console.print(f"[yellow]Issue flag:[/yellow] {escape(flag)}")
+
+    if result.analysis:
+        a = result.analysis
+        lines = [
+            f"Summary: {a.summary}",
+            f"Type: {a.issue_type.value} | confidence: {a.confidence}",
+            f"Root cause (hypothesis): {a.root_cause_hypothesis}",
+            "Acceptance criteria:",
+            *[f"  - {c}" for c in a.acceptance_criteria],
+        ]
+        if a.clarification_questions:
+            lines += ["Questions:", *[f"  - {q}" for q in a.clarification_questions]]
+        console.print(Panel(escape("\n".join(lines)), title="Analysis"))
+
+    if result.plan:
+        table = Table(title=f"Plan: {escape(result.plan.goal)}")
+        for column in ("step", "action", "file", "what"):
+            table.add_column(column)
+        for step in result.plan.steps:
+            table.add_row(
+                str(step.step_number),
+                step.action.value,
+                escape(step.file_path),
+                escape(step.description),
+            )
+        console.print(table)
+        console.print(f"Test strategy: {escape(result.plan.test_strategy)}")
+        for risk in result.plan.risks:
+            console.print(f"[yellow]Risk:[/yellow] {escape(risk)}")
+
+    for label in result.citations_valid:
+        console.print(f"[green]cited OK[/green]      {escape(label)}")
+    for label in result.citations_invalid:
+        console.print(f"[red]cited INVALID[/red] {escape(label)} (not in the code shown)")
+    for message in result.policy_violations:
+        console.print(f"[red]Policy block:[/red] {escape(message)}")
+    for message in [*result.policy_warnings, *result.notes]:
+        console.print(f"[yellow]Note:[/yellow] {escape(message)}")
+
+    log = Table(title="Tool calls")
+    for column in ("#", "tool", "ok", "ms", "args"):
+        log.add_column(column)
+    for rec in result.tool_log:
+        log.add_row(
+            str(rec.seq), rec.tool, "yes" if rec.ok else "no", str(rec.duration_ms),
+            escape(str(rec.args))[:70],
+        )
+    console.print(log)
+
+    out_file = workspace.root / "plan.json"
+    out_file.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    console.print(f"Saved: {out_file}")
+    return 0 if result.status.value == "ready" else 1
 
 
 def tool(args: list[str]) -> int:

@@ -77,6 +77,11 @@ class Settings(BaseSettings):
 
         # Use only the locally cached models; never contact Hugging Face.
     models_offline: bool = False
+
+        # --- Analysis and planning ---
+    max_explore_steps: int = Field(default=6, ge=1, le=15)
+    explore_result_chars: int = Field(default=2500, ge=500, le=6000)
+    max_plan_attempts: int = Field(default=2, ge=1, le=4)
     
     # --- Logging ---
     log_level: str = "INFO"

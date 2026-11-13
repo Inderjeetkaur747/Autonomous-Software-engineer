@@ -41,3 +41,8 @@ class ImplementationPlan(BaseModel):
     steps: list[PlanStep] = Field(min_length=1, max_length=15)
     test_strategy: str = Field(description="How we will prove the fix works")
     risks: list[str] = Field(default_factory=list)
+
+    citations: list[str] = Field(
+        default_factory=list,
+        description="Citations like path:start-end for the code this plan relies on",
+    )

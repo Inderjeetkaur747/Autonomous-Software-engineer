@@ -2,6 +2,7 @@ from swe_agent.retrieval.bm25 import Bm25Index
 from swe_agent.retrieval.citations import (
     CitationCheck,
     check_answer_citations,
+    check_citations_in_lines,
     citation_correctness,
     format_context,
     verify_chunk,
@@ -32,4 +33,7 @@ __all__ = [
     "reciprocal_rank_fusion",
     "tokenize_code",
     "verify_chunk",
+    "check_answer_citations",
+    "check_citations_in_lines",
+    "citation_correctness",
 ]

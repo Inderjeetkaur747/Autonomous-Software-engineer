@@ -1,6 +1,7 @@
 from swe_agent.indexing import chunk_file
 from swe_agent.retrieval import (
     check_answer_citations,
+    check_citations_in_lines,
     citation_correctness,
     format_context,
     verify_chunk,
@@ -8,6 +9,11 @@ from swe_agent.retrieval import (
 from swe_agent.schemas.code import ChunkKind, CodeChunk
 from swe_agent.schemas.retrieval import SearchHit
 
+
+def test_check_citations_in_lines_uses_a_plain_line_map():
+    check = check_citations_in_lines("a.py:2-3 and a.py:9", {"a.py": {1, 2, 3}})
+    assert check.valid == ["a.py:2-3"]
+    assert check.invalid == ["a.py:9-9"]
 
 def hit_for(path, start, end, text="x = 1"):
     chunk = CodeChunk(

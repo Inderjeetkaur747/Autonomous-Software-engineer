@@ -124,16 +124,8 @@ class GroqLLM:
         )
 
     # ------------------------------------------------------------- low level
-    def _chat(self, messages: list[dict[str, str]], *, purpose: str, json_mode: bool) -> str:
-        kwargs: dict[str, Any] = {
-            "model": self._settings.groq_model,
-            "messages": messages,
-            "temperature": self._settings.llm_temperature,
-            "max_tokens": self._settings.llm_max_output_tokens,
-        }
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-
+    def _request(self, kwargs: dict[str, Any], *, purpose: str) -> Any:
+        """Call the API with retries and backoff. Returns the raw response."""
         max_attempts = self._settings.llm_max_retries
         last_error: Exception | None = None
 
@@ -163,9 +155,46 @@ class GroqLLM:
                 continue
 
             self._record(purpose, attempt, started, response)
-            return response.choices[0].message.content or ""
+            return response
 
         raise LLMError(f"Groq call failed after {max_attempts} attempts: {last_error}")
+
+    def _chat(self, messages: list[dict[str, str]], *, purpose: str, json_mode: bool) -> str:
+        kwargs: dict[str, Any] = {
+            "model": self._settings.groq_model,
+            "messages": messages,
+            "temperature": self._settings.llm_temperature,
+            "max_tokens": self._settings.llm_max_output_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = self._request(kwargs, purpose=purpose)
+        return response.choices[0].message.content or ""
+
+    def chat_tools(
+        self, messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]], *, purpose: str = "explore"
+    ) -> ChatTurn:
+        """One step of a tool-calling conversation. The model may ask for tools."""
+        kwargs: dict[str, Any] = {
+            "model": self._settings.groq_model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": self._settings.llm_temperature,
+            "max_tokens": self._settings.llm_max_output_tokens,
+        }
+        response = self._request(kwargs, purpose=purpose)
+        message = response.choices[0].message
+        requests = [
+            ToolCallRequest(
+                id=str(call.id),
+                name=call.function.name,
+                arguments=call.function.arguments or "{}",
+            )
+            for call in (getattr(message, "tool_calls", None) or [])
+        ]
+        return ChatTurn(content=message.content or "", tool_calls=requests)
 
     # ------------------------------------------------------------ public API
     def generate_text(self, *, system: str, user: str, purpose: str = "text") -> str:
@@ -222,3 +251,33 @@ class GroqLLM:
             f"Model did not return valid {schema.__name__} after "
             f"{max_validation_retries + 1} attempts. Last error: {last_error}"
         )
+
+@dataclass
+class ToolCallRequest:
+    """One tool the model wants to use. `arguments` is the raw JSON text."""
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass
+class ChatTurn:
+    """The model's answer in a tool-calling chat: some text and/or tool requests."""
+
+    content: str
+    tool_calls: list[ToolCallRequest]
+
+    def to_message(self) -> dict[str, Any]:
+        """The assistant message to append to the conversation."""
+        message: dict[str, Any] = {"role": "assistant", "content": self.content or None}
+        if self.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": c.arguments},
+                }
+                for c in self.tool_calls
+            ]
+        return message

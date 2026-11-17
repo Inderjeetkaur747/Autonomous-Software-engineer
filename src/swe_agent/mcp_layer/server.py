@@ -23,6 +23,7 @@ from mcp.server.stdio import stdio_server
 from swe_agent.config import get_settings
 from swe_agent.github.workspace import WorkspaceManager
 from swe_agent.logging_setup import setup_logging
+from swe_agent.sandbox import get_runner
 from swe_agent.tools import EXPLORE_TOOLS, CodeSearcher, RepoTools
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         searcher=searcher,
         allowed_tools=EXPLORE_TOOLS if args.explore_only else None,
         write_paths=args.write_path,  # fail closed: empty list = no edits
+        runner=get_runner(settings),
     )
     logger.info("mcp server ready run_id=%s tools=%d", args.run_id, len(tools.specs()))
     asyncio.run(serve(tools))

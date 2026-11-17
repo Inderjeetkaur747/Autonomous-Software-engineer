@@ -86,6 +86,18 @@ class Settings(BaseSettings):
         # --- Workflow ---
     checkpoint_path: Path = Path("data/checkpoints.sqlite")
     max_plan_revisions: int = Field(default=2, ge=0, le=5)
+
+        # --- Docker sandbox ---
+    runner_backend: Literal["docker", "disabled"] = "docker"
+    docker_binary: str = "docker"
+    sandbox_image: str = Field(
+        default="swe-agent-sandbox:latest", pattern=r"^[a-z0-9][a-z0-9._/:@-]{0,127}$"
+    )  # must not start with '-', so it can never be read as a docker option
+    sandbox_memory: str = Field(default="512m", pattern=r"^[1-9][0-9]{0,4}[mg]$")
+    sandbox_cpus: float = Field(default=1.0, ge=0.25, le=4.0)
+    sandbox_pids: int = Field(default=128, ge=16, le=1024)
+    sandbox_tmpfs_mb: int = Field(default=256, ge=16, le=2048)
+    sandbox_output_bytes: int = Field(default=200_000, ge=10_000, le=5_000_000)
     
     # --- Logging ---
     log_level: str = "INFO"
@@ -95,3 +107,9 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Create settings once and reuse them (cached)."""
     return Settings()
+
+
+
+
+
+#d2a56f5a737b

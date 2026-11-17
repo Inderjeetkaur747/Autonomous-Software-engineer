@@ -11,6 +11,7 @@ from rich.table import Table
 from swe_agent import __version__
 from swe_agent.config import get_settings
 from swe_agent.logging_setup import setup_logging
+from swe_agent.sandbox import get_runner
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +103,82 @@ def main() -> None:
         raise SystemExit(decide(args[1:]))
     if command == "graph":
         raise SystemExit(graph_text(args[1:]))
+
+    if command == "sandbox":
+        raise SystemExit(sandbox(args[1:]))
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
 
+
+def sandbox(args: list[str]) -> int:
+    """Docker sandbox tools: swe-agent sandbox check | build | attack"""
+    import subprocess
+    from pathlib import Path
+
+    from rich.markup import escape
+
+    from swe_agent.sandbox import DockerRunner, run_attack_demo
+    from swe_agent.tools import RunnerUnavailable
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    sub = args[0] if args else ""
+
+    if sub == "build":
+        context = Path("docker/sandbox")
+        if not (context / "Dockerfile").exists():
+            console.print(
+                "[red]docker/sandbox/Dockerfile not found. Run from the project root.[/red]"
+            )
+            return 1
+        console.print(f"Building {settings.sandbox_image} (needs internet this one time)...")
+        try:
+            result = subprocess.run(
+                [settings.docker_binary, "build", "--tag", settings.sandbox_image, str(context)],
+                check=False,
+            )
+        except FileNotFoundError:
+            console.print("[red]Docker is not installed or not on PATH.[/red]")
+            return 1
+        return result.returncode
+
+    if sub not in ("check", "attack"):
+        console.print("Usage: swe-agent sandbox check | build | attack")
+        return 2
+
+    runner = DockerRunner(settings)
+    try:
+        version = runner.ensure_ready()
+    except RunnerUnavailable as exc:
+        console.print(f"[red]Sandbox not ready:[/red] {escape(str(exc))}")
+        return 1
+    if sub == "check":
+        console.print(
+            f"[green]Sandbox ready.[/green] Docker engine {escape(version)}, "
+            f"image {escape(settings.sandbox_image)}, memory {settings.sandbox_memory}, "
+            f"pids {settings.sandbox_pids}, network none."
+        )
+        return 0
+
+    console.print("Attacking the sandbox with hostile tests. About 30 to 60 seconds...")
+    try:
+        rows = run_attack_demo(runner, Path(settings.workspace_dir).resolve())
+    except RunnerUnavailable as exc:
+        console.print(f"[red]Failed:[/red] {escape(str(exc))}")
+        return 1
+    table = Table(title="Sandbox attack demo")
+    for column in ("check", "expected", "observed", "result"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            escape(row.name),
+            escape(row.expected),
+            escape(row.observed),
+            "[green]HELD[/green]" if row.ok else "[red]FAILED[/red]",
+        )
+    console.print(table)
+    return 0 if all(row.ok for row in rows) else 1
 
 _STATUS_COLORS = {
     "plan_approved": "green",
@@ -434,6 +508,7 @@ def tool(args: list[str]) -> int:
         workspace.repo_dir,
         settings=settings,
         searcher=CodeSearcher(workspace.run_id, workspace.root, settings),
+        runner=get_runner(settings),
     )
 
     if len(args) == 1:

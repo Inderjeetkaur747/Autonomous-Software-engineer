@@ -14,6 +14,7 @@ from swe_agent.agent import (
 )
 from swe_agent.config import Settings
 from swe_agent.schemas.analysis import IssueAnalysis
+from swe_agent.schemas.execution import ExecutionResult
 from swe_agent.schemas.plan import ImplementationPlan, PlanStep
 from swe_agent.schemas.planning import PlanningResult
 from swe_agent.schemas.workflow import PlanDecision
@@ -43,7 +44,7 @@ def planning(status="ready", paths=FILES):
 class Env:
     """A runner built from fake deps and a real SQLite checkpoint file."""
 
-    def __init__(self, tmp_path, statuses=("ready",), fail_in="", **settings_kw):
+    def __init__(self, tmp_path, statuses=("ready",), fail_in="", execute=None, **settings_kw):
         self.settings = Settings(
             _env_file=None,
             checkpoint_path=tmp_path / "cp.sqlite",
@@ -55,7 +56,11 @@ class Env:
         self._statuses, self._fail_in = list(statuses), fail_in
         self.saver = open_checkpointer(self.settings)
         deps = AgentDeps(
-            settings=self.settings, prepare=self._prepare, index=self._index, plan=self._plan
+            settings=self.settings,
+            prepare=self._prepare,
+            index=self._index,
+            plan=self._plan,
+            execute=execute,
         )
         self.runner = AgentRunner(deps, self.saver)
 
@@ -258,3 +263,38 @@ def test_plan_hash_is_stable_and_sensitive():
 def test_graph_diagram_shows_the_approval_node(make_env):
     text = make_env().runner.mermaid()
     assert "approve_plan" in text and "execute" in text
+
+
+def test_approval_runs_the_executor_with_exactly_the_approved_files(make_env):
+    seen = []
+
+    def fake_execute(run_id, files, plan):
+        seen.append((run_id, files, plan["goal"]))
+        return ExecutionResult(status="tests_passed", changed_files=["mathkit/stats.py"])
+
+    env = make_env(execute=fake_execute)
+    env.runner.start("me/demo", 1, RUN)
+    done = env.runner.decide(RUN, PlanDecision(action="approve"))
+    assert seen == [(RUN, list(FILES), "g")]
+    assert done.status == "tests_passed"
+    assert done.execution["changed_files"] == ["mathkit/stats.py"]
+    assert done.events[-1]["node"] == "execute"
+
+
+def test_the_executor_never_runs_without_approval(make_env):
+    calls = []
+    env = make_env(execute=lambda *args: calls.append(args))
+    env.runner.start("me/demo", 1, RUN)
+    env.runner.decide(RUN, PlanDecision(action="reject"))
+    assert calls == []
+
+
+def test_a_crashing_executor_becomes_a_failed_run(make_env):
+    def boom(*_args):
+        raise RuntimeError("sandbox exploded gsk_" + "a" * 30)
+
+    env = make_env(execute=boom)
+    env.runner.start("me/demo", 1, RUN)
+    done = env.runner.decide(RUN, PlanDecision(action="approve"))
+    assert done.status == "failed"
+    assert done.error.startswith("execute:") and "gsk_" not in done.error

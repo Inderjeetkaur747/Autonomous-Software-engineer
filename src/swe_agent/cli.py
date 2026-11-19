@@ -106,8 +106,39 @@ def main() -> None:
 
     if command == "sandbox":
         raise SystemExit(sandbox(args[1:]))
+
+    if command == "reset":
+        raise SystemExit(reset_workspace(args[1:]))
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+
+def reset_workspace(args: list[str]) -> int:
+    """Throw away ALL changes in a workspace: swe-agent reset <run_id>"""
+    from pathlib import Path
+
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+    from swe_agent.github.cloner import GitError, run_git
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent reset <run_id>")
+        return 2
+    try:
+        repo = WorkspaceManager(settings).get(args[0]).repo_dir
+        top = run_git(["rev-parse", "--show-toplevel"], cwd=repo, timeout=30, action="rev-parse")
+        if Path(top).resolve() != repo.resolve():
+            console.print("[red]Refused:[/red] this folder is not its own git repository.")
+            return 1
+        run_git(["checkout", "--", "."], cwd=repo, timeout=60, action="checkout")
+        run_git(["clean", "-fd"], cwd=repo, timeout=60, action="clean")
+    except (WorkspaceError, GitError) as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    console.print(f"[green]Workspace {args[0]} is back to the original code.[/green]")
+    return 0
 
 
 def sandbox(args: list[str]) -> int:
@@ -182,12 +213,19 @@ def sandbox(args: list[str]) -> int:
 
 _STATUS_COLORS = {
     "plan_approved": "green",
+    "tests_passed": "green",
     "plan_ready": "yellow",
     "needs_clarification": "yellow",
+    "needs_human": "yellow",
+    "no_changes": "yellow",
     "failed": "red",
     "blocked": "red",
     "rejected": "red",
     "revision_limit": "red",
+    "tests_failed": "red",
+    "stuck": "red",
+    "sandbox_unavailable": "red",
+    "llm_error": "red",
 }
 
 
@@ -219,6 +257,8 @@ def _show_run(console: Console, st) -> None:
         console.print(Panel(escape("\n".join(f"- {q}" for q in questions)), title="Questions"))
     if st.approved_files:
         console.print(f"[green]Approved files:[/green] {escape(', '.join(st.approved_files))}")
+    if st.execution:
+        _show_execution(console, st.execution)
 
     if not st.paused:
         return
@@ -257,6 +297,57 @@ def _show_run(console: Console, st) -> None:
     console.print(
         f'Decide with:  swe-agent decide {st.run_id} approve | reject | revise "your feedback"'
     )
+
+def _outcome_text(outcome) -> str:
+    if not outcome:
+        return "-"
+    counts = ", ".join(f"{v} {k}" for k, v in (outcome.get("counts") or {}).items())
+    return f"{'PASS' if outcome.get('passed') else 'FAIL'}: {counts or 'no summary'}"
+
+
+def _show_execution(console: Console, ex: dict) -> None:
+    from rich.markup import escape
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    color = "green" if ex.get("status") == "tests_passed" else "red"
+    console.print(
+        f"Execution: [{color}]{ex.get('status')}[/{color}] | repairs used: "
+        f"{ex.get('repairs_used', 0)} | LLM calls: {ex.get('llm_calls', 0)} | tokens: "
+        f"{ex.get('total_tokens', 0)} | {ex.get('seconds', 0)}s"
+    )
+    table = Table(title="Test runs")
+    for column in ("#", "kind", "edits", "tests", "diagnosis"):
+        table.add_column(column)
+    if ex.get("baseline"):
+        table.add_row("-", "baseline", "-", _outcome_text(ex["baseline"]), "-")
+    for attempt in ex.get("attempts", []):
+        diag = attempt.get("diagnosis")
+        diag_text = escape(f"{diag['category']}: {diag['summary']}"[:80]) if diag else "-"
+        table.add_row(
+            str(attempt["number"]),
+            attempt["kind"],
+            str(attempt["edits_made"]),
+            _outcome_text(attempt.get("outcome")),
+            diag_text,
+        )
+    console.print(table)
+    console.print(f"Changed files: {escape(', '.join(ex.get('changed_files', [])) or '-')}")
+    for name in ex.get("fixed_tests", []):
+        console.print(f"[green]Now passing:[/green] {escape(name)}")
+    for name in ex.get("new_failures", []):
+        console.print(f"[red]New failure:[/red] {escape(name)}")
+    for warning in ex.get("weakened_tests", []):
+        console.print(f"[red]Test warning:[/red] {escape(warning)}")
+    for note in ex.get("notes", []):
+        console.print(f"[yellow]Note:[/yellow] {escape(note)}")
+    if ex.get("diff_preview"):
+        console.print(
+            Panel(
+                Syntax(ex["diff_preview"], "diff"),
+                title="Diff preview (the real patch comes in Phase 13)",
+            )
+        )
 
 
 def _open_runner(settings):
@@ -351,6 +442,11 @@ def decide(args: list[str]) -> int:
     try:
         if decision.action == "revise":
             console.print("Planning again with your feedback. This can take about a minute...")
+        elif decision.action == "approve":
+            console.print(
+                "Approved. Editing, testing and repairing in the sandbox. "
+                "This can take several minutes..."
+            )
         status = runner.decide(args[0], decision)
     except WorkflowError as exc:
         console.print(f"[red]Failed:[/red] {exc}")

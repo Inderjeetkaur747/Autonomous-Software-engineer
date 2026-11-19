@@ -12,7 +12,8 @@ _INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206
 _SUSPICIOUS_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069]")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _TAG_RE = re.compile(
-    r"<(/?)\s*(issue|code_context|analysis|plan|system|assistant|user|instructions?)(\s*>)",
+    r"<(/?)\s*(issue|code_context|analysis|plan|system|assistant|user|instructions?"
+    r"|tool_output|test_output|diagnosis|diff)(\s*>)",
     re.IGNORECASE,
 )
 

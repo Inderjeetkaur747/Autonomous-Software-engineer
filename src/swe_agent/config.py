@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     sandbox_tmpfs_mb: int = Field(default=256, ge=16, le=2048)
     sandbox_output_bytes: int = Field(default=200_000, ge=10_000, le=5_000_000)
     
+        # --- Execution: edit, test, repair ---
+    max_edit_steps: int = Field(default=8, ge=1, le=20)
+    edit_result_chars: int = Field(default=1800, ge=500, le=6000)
+    test_command: str = Field(default="pytest -q --tb=short", max_length=200)
+    diagnosis_output_chars: int = Field(default=2800, ge=500, le=8000)
     # --- Logging ---
     log_level: str = "INFO"
 
@@ -112,4 +117,3 @@ def get_settings() -> Settings:
 
 
 
-#d2a56f5a737b

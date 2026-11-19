@@ -27,6 +27,7 @@ from swe_agent.github.workspace import WorkspaceError, WorkspaceManager
 from swe_agent.logging_setup import redact_secrets
 from swe_agent.schemas.planning import PlanningResult
 from swe_agent.schemas.workflow import PlanDecision, RunStatus
+from swe_agent.schemas.execution import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class AgentState(TypedDict, total=False):
     decision: str  # approve | revise | reject | stop
     approved_files: list[str]
     events: Annotated[list[dict[str, Any]], operator.add]
+    execution: dict[str, Any]
 
 
 @dataclass
@@ -78,6 +80,7 @@ class AgentDeps:
     prepare: Callable[[str, int, str], dict[str, Any]]  # (repo, issue number, run_id)
     index: Callable[[str], dict[str, Any]]  # (run_id)
     plan: Callable[[str, str], PlanningResult]  # (run_id, reviewer feedback)
+    execute: Callable[[str, list[str], dict[str, Any]], ExecutionResult] | None = None
 
 
 # ------------------------------------------------------------------ helpers
@@ -243,9 +246,24 @@ def build_graph(deps: AgentDeps, checkpointer: Any):
         }
 
     def execute_node(state: AgentState) -> dict[str, Any]:
-        # PLACEHOLDER. Phases 11 to 13 add: Docker sandbox, editing, tests, repair loop, diff.
-        files = ", ".join(state.get("approved_files", []))
-        return {"events": [_event("execute", f"not implemented yet; will be allowed to edit: {files}")]}  # noqa: E501
+        files = state.get("approved_files", [])
+        if deps.execute is None:  # no executor configured (tests of the flow only)
+            detail = f"not configured; would be allowed to edit: {', '.join(files)}"
+            return {"events": [_event("execute", detail)]}
+        plan = (state.get("planning") or {}).get("plan") or {}
+        try:
+            result = deps.execute(state["run_id"], files, plan)
+        except Exception as exc:  # noqa: BLE001
+            return _failed("execute", exc)
+        detail = (
+            f"{result.status.value}: {len(result.changed_files)} file(s) changed, "
+            f"{len(result.attempts)} test run(s), {result.repairs_used} repair(s)"
+        )
+        return {
+            "status": result.status.value,
+            "execution": result.model_dump(mode="json"),
+            "events": [_event("execute", detail)],
+        }
 
     graph = StateGraph(AgentState)
     graph.add_node("prepare", prepare_node)
@@ -340,6 +358,7 @@ class AgentRunner:
             plan_revisions=values.get("plan_revisions", 0),
             planning=values.get("planning", {}),
             events=values.get("events", []),
+            execution=values.get("execution", {}),
         )
 
     def decide(self, run_id: str, decision: PlanDecision) -> RunStatus:

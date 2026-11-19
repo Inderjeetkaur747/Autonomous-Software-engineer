@@ -32,3 +32,4 @@ class RunStatus(BaseModel):
     plan_revisions: int = 0
     planning: dict[str, Any] = Field(default_factory=dict)
     events: list[dict[str, Any]] = Field(default_factory=list)
+    execution: dict[str, Any] = Field(default_factory=dict)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from swe_agent.agent.editor import EXECUTION_TOOLS
+from swe_agent.agent.executor import execute_plan
 from swe_agent.agent.planning import load_issue, plan_issue
 from swe_agent.agent.workflow import AgentDeps
 from swe_agent.config import Settings, get_settings
@@ -18,6 +20,9 @@ from swe_agent.indexing import (
     save_chunks,
 )
 from swe_agent.llm import GroqLLM
+from swe_agent.sandbox import get_runner
+from swe_agent.schemas.execution import ExecutionResult
+from swe_agent.schemas.plan import ImplementationPlan
 from swe_agent.schemas.planning import PlanningResult
 from swe_agent.tools import EXPLORE_TOOLS, CodeSearcher, RepoTools
 
@@ -91,4 +96,30 @@ def make_default_deps(settings: Settings | None = None) -> AgentDeps:
             result.model_dump_json(indent=2), encoding="utf-8")
         return result
 
-    return AgentDeps(settings=settings, prepare=prepare, index=index, plan=plan)
+    def execute(run_id: str, approved_files: list[str], plan: dict[str, Any]) -> ExecutionResult:
+        workspace = WorkspaceManager(settings).get(run_id)
+        issue = load_issue(workspace.root)
+        tools = RepoTools(
+            workspace.repo_dir,
+            settings=settings,
+            searcher=CodeSearcher(workspace.run_id, workspace.root, settings),
+            runner=get_runner(settings),  # the Docker sandbox from Phase 11
+            allowed_tools=EXECUTION_TOOLS,
+            write_paths=approved_files,  # ONLY the files of the approved plan
+        )
+        result = execute_plan(
+            issue=issue,
+            plan=ImplementationPlan.model_validate(plan),
+            approved_files=approved_files,
+            tools=tools,
+            llm=GroqLLM(settings),
+            settings=settings,
+        )
+        (workspace.root / "execution.json").write_text(
+            result.model_dump_json(indent=2), encoding="utf-8"
+        )
+        return result
+
+    return AgentDeps(
+        settings=settings, prepare=prepare, index=index, plan=plan, execute=execute
+    )

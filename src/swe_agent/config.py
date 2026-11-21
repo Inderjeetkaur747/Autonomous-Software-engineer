@@ -107,6 +107,13 @@ class Settings(BaseSettings):
 
         # --- Patch review ---
     patch_preview_chars: int = Field(default=30000, ge=2000, le=200000)
+
+        # --- HTTP API ---
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(default=8000, ge=1, le=65535)
+    api_key: SecretStr = SecretStr("")  # empty = no key (only safe on localhost)
+    api_workers: int = Field(default=1, ge=1, le=4)
+    api_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501"
     # --- Logging ---
     log_level: str = "INFO"
 

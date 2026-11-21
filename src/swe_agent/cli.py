@@ -114,8 +114,49 @@ def main() -> None:
         raise SystemExit(review(args[1:]))
     if command == "patch":
         raise SystemExit(show_patch(args[1:]))
+    if command == "serve":
+        raise SystemExit(serve(args[1:]))
+
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
+
+def serve(args: list[str]) -> int:
+    """Start the HTTP API: swe-agent serve [--host HOST] [--port PORT]"""
+    import uvicorn
+
+    from swe_agent.api import create_app, ensure_safe_bind
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    host, port, position = settings.api_host, settings.api_port, 0
+    try:
+        while position < len(args):
+            if args[position] == "--host" and position + 1 < len(args):
+                host = args[position + 1]
+            elif args[position] == "--port" and position + 1 < len(args):
+                port = int(args[position + 1])
+            else:
+                console.print("Usage: swe-agent serve [--host HOST] [--port PORT]")
+                return 2
+            position += 2
+    except ValueError:
+        console.print("[red]--port must be a number.[/red]")
+        return 2
+    try:
+        ensure_safe_bind(host, settings)
+    except ValueError as exc:
+        console.print(f"[red]Refused:[/red] {exc}")
+        return 1
+
+    auth = "on" if settings.api_key.get_secret_value() else "off (localhost only)"
+    console.print(f"API: http://{host}:{port}   docs: http://{host}:{port}/docs   api key: {auth}")
+    console.print(
+        "Stop with Ctrl+C. Do not run other swe-agent commands that use Qdrant meanwhile."
+    )
+    uvicorn.run(create_app(settings), host=host, port=port, log_config=None)
+    return 0
+
 
 def review(args: list[str]) -> int:
     """Answer the final patch question.

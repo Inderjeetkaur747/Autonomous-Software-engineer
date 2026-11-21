@@ -109,16 +109,84 @@ def main() -> None:
 
     if command == "reset":
         raise SystemExit(reset_workspace(args[1:]))
+
+    if command == "review":
+        raise SystemExit(review(args[1:]))
+    if command == "patch":
+        raise SystemExit(show_patch(args[1:]))
     print("Usage: swe-agent [doctor | llm-test | prepare ... | clean <run_id>]")
     raise SystemExit(2)
 
+def review(args: list[str]) -> int:
+    """Answer the final patch question.
+
+    swe-agent review <run_id> approve|reject [--accept-risk] [--patch-hash=HASH]
+    """
+    from pydantic import ValidationError
+
+    from swe_agent.agent import WorkflowError, close_checkpointer
+    from swe_agent.schemas.workflow import PatchDecision
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) < 2:
+        console.print("Usage: swe-agent review <run_id> approve|reject [--accept-risk]")
+        return 2
+    flags = args[2:]
+    patch_hash = next((a.split("=", 1)[1] for a in flags if a.startswith("--patch-hash=")), "")
+    try:
+        decision = PatchDecision(
+            action=args[1], patch_hash=patch_hash, accept_risk="--accept-risk" in flags
+        )
+    except ValidationError as exc:
+        console.print(f"[red]Invalid decision:[/red] {exc.errors()[0]['msg']}")
+        return 2
+
+    runner, saver = _open_runner(settings)
+    try:
+        status = runner.decide_patch(args[0], decision)
+    except WorkflowError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    finally:
+        close_checkpointer(saver)
+    _show_run(console, status)
+    return 0 if status.status in ("patch_approved", "patch_rejected") else 1
+
+
+def show_patch(args: list[str]) -> int:
+    """Print the saved patch: swe-agent patch <run_id>"""
+    from swe_agent.github import WorkspaceError, WorkspaceManager
+
+    console = Console()
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if len(args) != 1:
+        console.print("Usage: swe-agent patch <run_id>")
+        return 2
+    try:
+        root = WorkspaceManager(settings).get(args[0]).root
+    except WorkspaceError as exc:
+        console.print(f"[red]Failed:[/red] {exc}")
+        return 1
+    for name in ("approved.patch", "patch.diff", "rejected.patch"):
+        path = root / name
+        if path.exists():
+            console.print(f"# {path}", markup=False)
+            console.print(
+                path.read_text(encoding="utf-8", errors="replace"),
+                markup=False,
+                highlight=False,
+            )
+            return 0
+    console.print("[red]No patch file yet.[/red]")
+    return 1
 
 def reset_workspace(args: list[str]) -> int:
     """Throw away ALL changes in a workspace: swe-agent reset <run_id>"""
-    from pathlib import Path
-
+    from swe_agent.agent import PatchError, discard_changes
     from swe_agent.github import WorkspaceError, WorkspaceManager
-    from swe_agent.github.cloner import GitError, run_git
 
     console = Console()
     settings = get_settings()
@@ -127,14 +195,8 @@ def reset_workspace(args: list[str]) -> int:
         console.print("Usage: swe-agent reset <run_id>")
         return 2
     try:
-        repo = WorkspaceManager(settings).get(args[0]).repo_dir
-        top = run_git(["rev-parse", "--show-toplevel"], cwd=repo, timeout=30, action="rev-parse")
-        if Path(top).resolve() != repo.resolve():
-            console.print("[red]Refused:[/red] this folder is not its own git repository.")
-            return 1
-        run_git(["checkout", "--", "."], cwd=repo, timeout=60, action="checkout")
-        run_git(["clean", "-fd"], cwd=repo, timeout=60, action="clean")
-    except (WorkspaceError, GitError) as exc:
+        discard_changes(WorkspaceManager(settings).get(args[0]).repo_dir)
+    except (WorkspaceError, PatchError) as exc:
         console.print(f"[red]Failed:[/red] {exc}")
         return 1
     console.print(f"[green]Workspace {args[0]} is back to the original code.[/green]")
@@ -226,6 +288,11 @@ _STATUS_COLORS = {
     "stuck": "red",
     "sandbox_unavailable": "red",
     "llm_error": "red",
+    "patch_ready": "yellow",
+    "patch_approved": "green",
+    "patch_rejected": "red",
+    "patch_blocked": "red",
+    "no_patch": "yellow",
 }
 
 
@@ -261,6 +328,11 @@ def _show_run(console: Console, st) -> None:
         _show_execution(console, st.execution)
 
     if not st.paused:
+        if st.patch:
+            _show_patch(console, st.run_id, st.patch, waiting=False)
+        return
+    if st.approval.get("type") == "patch_approval":
+        _show_patch(console, st.run_id, st.approval, waiting=True)
         return
     a = st.approval
     analysis, plan_data = a.get("analysis") or {}, a.get("plan") or {}
@@ -297,6 +369,53 @@ def _show_run(console: Console, st) -> None:
     console.print(
         f'Decide with:  swe-agent decide {st.run_id} approve | reject | revise "your feedback"'
     )
+
+def _show_patch(console: Console, run_id: str, p: dict, *, waiting: bool) -> None:
+    from rich.markup import escape
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    if p.get("files"):
+        table = Table(title="Files in the patch")
+        for column in ("file", "change", "+", "-"):
+            table.add_column(column)
+        for f in p["files"]:
+            table.add_row(escape(f["path"]), f["status"], str(f["additions"]), str(f["deletions"]))
+        console.print(table)
+    if p.get("patch_hash"):
+        console.print(
+            f"Patch hash: {p['patch_hash']} | size: {p.get('size_bytes', 0)} bytes | "
+            f"applies to base commit: {p.get('applies_to_base')} | "
+            f"tests passed: {p.get('tests_passed')} ({p.get('execution_status', '')})"
+        )
+    for message in p.get("violations", []):
+        console.print(f"[red]Patch blocked:[/red] {escape(message)}")
+    for message in p.get("weakened_tests", []):
+        console.print(f"[red]Test warning:[/red] {escape(message)}")
+    for message in p.get("warnings", []):
+        console.print(f"[yellow]Note:[/yellow] {escape(message)}")
+    for name in p.get("fixed_tests", []):
+        console.print(f"[green]Now passing:[/green] {escape(name)}")
+    for name in p.get("new_failures", []):
+        console.print(f"[red]New failure:[/red] {escape(name)}")
+    if p.get("diff_preview"):
+        console.print(Panel(Syntax(p["diff_preview"], "diff"), title="Patch"))
+        if p.get("truncated"):
+            console.print(
+                f"[yellow]Preview cut. Full patch: "
+                f"{escape(p.get('patch_path', ''))}[/yellow]"
+            )
+    if p.get("approved_path"):
+        console.print(f"[green]Approved patch saved:[/green] {escape(p['approved_path'])}")
+        console.print(
+            "To use it in YOUR OWN clone:  git apply <that file>   "
+            "then commit and push it yourself. This agent never pushes or merges."
+        )
+    if waiting:
+        for reason in p.get("ack_reasons", []):
+            console.print(f"[yellow]Needs --accept-risk:[/yellow] {escape(reason)}")
+        flag = " --accept-risk" if p.get("requires_acknowledgement") else ""
+        console.print(f"Decide with:  swe-agent review {run_id} approve{flag}  |  reject")
 
 def _outcome_text(outcome) -> str:
     if not outcome:

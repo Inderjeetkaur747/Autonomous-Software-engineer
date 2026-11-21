@@ -69,6 +69,34 @@ def run_git(
         raise GitError(f"git {action} failed: {detail}")
     return result.stdout.strip()
 
+def run_git_bytes(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    token: str = "",
+    timeout: int = 60,
+    action: str = "command",
+) -> bytes:
+    """Like run_git, but returns raw BYTES. Text mode would turn \\r\\n into \\n."""
+    try:
+        result = subprocess.run(  # noqa: S603 (list args, shell is off)
+            ["git", *args],
+            cwd=cwd,
+            env=_git_env(token),
+            capture_output=True,
+            timeout=timeout,
+            shell=False,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"git {action} timed out after {timeout}s") from exc
+    except FileNotFoundError as exc:
+        raise GitError("git is not installed or not on PATH") from exc
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise GitError(f"git {action} failed: {redact_secrets(stderr)[:500]}")
+    return result.stdout
 
 def _clone(url: str, dest: Path, *, token: str = "", timeout: int = 180) -> None:
     run_git(

@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     edit_result_chars: int = Field(default=1800, ge=500, le=6000)
     test_command: str = Field(default="pytest -q --tb=short", max_length=200)
     diagnosis_output_chars: int = Field(default=2800, ge=500, le=8000)
+
+        # --- Patch review ---
+    patch_preview_chars: int = Field(default=30000, ge=2000, le=200000)
     # --- Logging ---
     log_level: str = "INFO"
 

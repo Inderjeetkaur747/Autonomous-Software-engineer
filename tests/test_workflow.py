@@ -15,9 +15,10 @@ from swe_agent.agent import (
 from swe_agent.config import Settings
 from swe_agent.schemas.analysis import IssueAnalysis
 from swe_agent.schemas.execution import ExecutionResult
+from swe_agent.schemas.patch import PatchFile, PatchResult
 from swe_agent.schemas.plan import ImplementationPlan, PlanStep
 from swe_agent.schemas.planning import PlanningResult
-from swe_agent.schemas.workflow import PlanDecision
+from swe_agent.schemas.workflow import PatchDecision, PlanDecision
 
 RUN = "a" * 12
 FILES = ("mathkit/stats.py", "tests/test_stats.py")
@@ -44,7 +45,10 @@ def planning(status="ready", paths=FILES):
 class Env:
     """A runner built from fake deps and a real SQLite checkpoint file."""
 
-    def __init__(self, tmp_path, statuses=("ready",), fail_in="", execute=None, **settings_kw):
+    def __init__(
+        self, tmp_path, statuses=("ready",), fail_in="", execute=None,
+        make_patch=None, accept_patch=None, discard_patch=None, **settings_kw,
+    ):
         self.settings = Settings(
             _env_file=None,
             checkpoint_path=tmp_path / "cp.sqlite",
@@ -61,6 +65,9 @@ class Env:
             index=self._index,
             plan=self._plan,
             execute=execute,
+            make_patch=make_patch,
+            accept_patch=accept_patch,
+            discard_patch=discard_patch,
         )
         self.runner = AgentRunner(deps, self.saver)
 
@@ -298,3 +305,154 @@ def test_a_crashing_executor_becomes_a_failed_run(make_env):
     done = env.runner.decide(RUN, PlanDecision(action="approve"))
     assert done.status == "failed"
     assert done.error.startswith("execute:") and "gsk_" not in done.error
+
+
+# ------------------------------------------------------------ patch review
+PHASH = "a1b2c3d4e5f60718"
+
+
+def good_execution(run_id, files, plan):
+    return ExecutionResult(status="tests_passed", changed_files=list(files))
+
+
+def patch_result(status="ready", **kw):
+    return PatchResult(
+        status=status,
+        patch_hash=PHASH if status == "ready" else "",
+        files=[PatchFile(path="mathkit/stats.py", status="modified", additions=2)],
+        additions=2,
+        diff_preview="diff --git a/x b/x",
+        tests_passed=True,
+        **kw,
+    )
+
+
+class PatchSpy:
+    def __init__(self, result=None, accept_error=None):
+        self.result = result or patch_result()
+        self.accept_error = accept_error
+        self.made, self.accepted, self.discarded = [], [], []
+
+    def make(self, run_id, files, execution):
+        self.made.append((run_id, list(files), execution.get("status")))
+        return self.result
+
+    def accept(self, run_id, patch_hash, files):
+        if self.accept_error:
+            raise self.accept_error
+        self.accepted.append((run_id, patch_hash, list(files)))
+        return {"path": "ws/approved.patch"}
+
+    def discard(self, run_id):
+        self.discarded.append(run_id)
+
+
+def at_review(make_env, spy):
+    env = make_env(
+        execute=good_execution, make_patch=spy.make,
+        accept_patch=spy.accept, discard_patch=spy.discard,
+    )
+    env.runner.start("me/demo", 1, RUN)
+    return env, env.runner.decide(RUN, PlanDecision(action="approve"))
+
+
+def test_a_ready_patch_pauses_for_the_final_review_then_saves_on_approval(make_env):
+    spy = PatchSpy()
+    env, paused = at_review(make_env, spy)
+    assert paused.paused and paused.waiting_for == "review_patch"
+    assert paused.status == "patch_ready"
+    assert paused.approval["type"] == "patch_approval"
+    assert paused.approval["patch_hash"] == PHASH
+    assert spy.made == [(RUN, list(FILES), "tests_passed")]
+    assert spy.accepted == []  # nothing is saved before the human decides
+
+    done = env.runner.decide_patch(RUN, PatchDecision(action="approve"))
+    assert done.status == "patch_approved" and not done.paused
+    assert spy.accepted == [(RUN, PHASH, list(FILES))]
+    assert done.patch["approved_path"] == "ws/approved.patch"
+    assert nodes(done) == [
+        "prepare", "index", "plan", "approve_plan", "execute", "make_patch", "review_patch",
+    ]
+
+
+def test_rejecting_discards_the_changes(make_env):
+    spy = PatchSpy()
+    env, _ = at_review(make_env, spy)
+    done = env.runner.decide_patch(RUN, PatchDecision(action="reject"))
+    assert done.status == "patch_rejected"
+    assert spy.discarded == [RUN] and spy.accepted == []
+
+
+def test_no_changes_and_blocked_patches_never_reach_the_human(make_env):
+    for kind, expected in (("no_changes", "no_patch"), ("blocked", "patch_blocked")):
+        result = patch_result(kind, violations=["x"]) if kind == "blocked" else patch_result(kind)
+        spy = PatchSpy(result)
+        env, status = at_review(make_env, spy)
+        assert status.status == expected and not status.paused
+        assert "review_patch" not in nodes(status)
+        env.close()
+        (env.settings.checkpoint_path).unlink()
+
+
+def test_risky_patches_need_an_explicit_acknowledgement(make_env):
+    spy = PatchSpy(patch_result(requires_acknowledgement=True, ack_reasons=["Tests did not pass."]))
+    env, paused = at_review(make_env, spy)
+    assert paused.approval["requires_acknowledgement"] is True
+    with pytest.raises(WorkflowError, match="accept-risk"):
+        env.runner.decide_patch(RUN, PatchDecision(action="approve"))
+    assert spy.accepted == [] and env.runner.status(RUN).paused
+    done = env.runner.decide_patch(RUN, PatchDecision(action="approve", accept_risk=True))
+    assert done.status == "patch_approved"
+
+
+def test_a_decision_for_another_patch_is_refused(make_env):
+    spy = PatchSpy()
+    env, _ = at_review(make_env, spy)
+    with pytest.raises(WorkflowError, match="different patch"):
+        env.runner.decide_patch(RUN, PatchDecision(action="approve", patch_hash="0" * 16))
+    assert env.runner.status(RUN).paused
+
+
+def test_garbage_answers_are_not_approvals_and_do_not_delete_anything(make_env):
+    spy = PatchSpy(patch_result(requires_acknowledgement=True, ack_reasons=["r"]))
+    env, _ = at_review(make_env, spy)
+    config = env.runner._config(RUN)
+    env.runner._graph.invoke(Command(resume={"action": "merge"}), config)
+    status = env.runner.status(RUN)
+    assert status.status == "patch_rejected"
+    assert spy.accepted == [] and spy.discarded == []  # nothing saved, nothing destroyed
+
+
+def test_a_failing_save_becomes_a_failed_run_without_secrets(make_env):
+    spy = PatchSpy(accept_error=RuntimeError("disk full gsk_" + "a" * 30))
+    env, _ = at_review(make_env, spy)
+    done = env.runner.decide_patch(RUN, PatchDecision(action="approve"))
+    assert done.status == "failed"
+    assert done.error.startswith("review_patch:") and "gsk_" not in done.error
+
+
+def test_plan_and_patch_decisions_cannot_be_mixed_up(make_env):
+    spy = PatchSpy()
+    env = make_env(execute=good_execution, make_patch=spy.make)
+    env.runner.start("me/demo", 1, RUN)  # waiting for the PLAN decision
+    with pytest.raises(WorkflowError, match="not waiting for a patch decision"):
+        env.runner.decide_patch(RUN, PatchDecision(action="approve"))
+    env.runner.decide(RUN, PlanDecision(action="approve"))  # now waiting for the PATCH
+    with pytest.raises(WorkflowError, match="not waiting for a plan decision"):
+        env.runner.decide(RUN, PlanDecision(action="approve"))
+
+
+def test_the_patch_pause_survives_a_restart(make_env):
+    spy = PatchSpy()
+    first, _ = at_review(make_env, spy)
+    first.close()
+    second = make_env(
+        execute=good_execution,
+        make_patch=spy.make,
+        accept_patch=spy.accept,
+        discard_patch=spy.discard,
+    )
+    assert second.runner.status(RUN).waiting_for == "review_patch"
+    result = second.runner.decide_patch(RUN, PatchDecision(action="approve"))
+    assert result.status == "patch_approved"
+    assert len(spy.made) == 1  # the patch was not rebuilt

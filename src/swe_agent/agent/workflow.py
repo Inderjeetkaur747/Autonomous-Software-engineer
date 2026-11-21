@@ -25,9 +25,10 @@ from swe_agent.config import Settings
 from swe_agent.github.urls import resolve_issue_ref
 from swe_agent.github.workspace import WorkspaceError, WorkspaceManager
 from swe_agent.logging_setup import redact_secrets
-from swe_agent.schemas.planning import PlanningResult
-from swe_agent.schemas.workflow import PlanDecision, RunStatus
 from swe_agent.schemas.execution import ExecutionResult
+from swe_agent.schemas.patch import PatchResult
+from swe_agent.schemas.planning import PlanningResult
+from swe_agent.schemas.workflow import PatchDecision, PlanDecision, RunStatus
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,11 @@ class Status:
     REJECTED = "rejected"
     PLAN_APPROVED = "plan_approved"
     FAILED = "failed"
+    PATCH_READY = "patch_ready"  # waiting for the human
+    PATCH_APPROVED = "patch_approved"
+    PATCH_REJECTED = "patch_rejected"
+    PATCH_BLOCKED = "patch_blocked"
+    NO_PATCH = "no_patch"
 
 
 class AgentState(TypedDict, total=False):
@@ -70,6 +76,7 @@ class AgentState(TypedDict, total=False):
     approved_files: list[str]
     events: Annotated[list[dict[str, Any]], operator.add]
     execution: dict[str, Any]
+    patch: dict[str, Any]
 
 
 @dataclass
@@ -81,6 +88,9 @@ class AgentDeps:
     index: Callable[[str], dict[str, Any]]  # (run_id)
     plan: Callable[[str, str], PlanningResult]  # (run_id, reviewer feedback)
     execute: Callable[[str, list[str], dict[str, Any]], ExecutionResult] | None = None
+    make_patch: Callable[[str, list[str], dict[str, Any]], PatchResult] | None = None
+    accept_patch: Callable[[str, str, list[str]], dict[str, Any]] | None = None
+    discard_patch: Callable[[str], None] | None = None
 
 
 # ------------------------------------------------------------------ helpers
@@ -135,6 +145,9 @@ def route_after_plan(state: AgentState) -> str:
 
 def route_after_decision(state: AgentState) -> str:
     return {"approve": "execute", "revise": "plan"}.get(state.get("decision", ""), "end")
+
+def route_after_patch(state: AgentState) -> str:
+    return "review" if state.get("status") == Status.PATCH_READY else "end"
 
 
 # --------------------------------------------------------------------- graph
@@ -265,12 +278,129 @@ def build_graph(deps: AgentDeps, checkpointer: Any):
             "events": [_event("execute", detail)],
         }
 
+    def route_after_execute(state: AgentState) -> str:
+        if deps.make_patch is None or state.get("status") == Status.FAILED:
+            return "end"
+        return "patch"
+
+    def make_patch_node(state: AgentState) -> dict[str, Any]:
+        make = deps.make_patch
+        if make is None:
+            return _failed("make_patch", RuntimeError("no patch builder configured"))
+        try:
+            result = make(
+                state["run_id"], state.get("approved_files", []), state.get("execution") or {}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _failed("make_patch", exc)
+        status = {
+            "ready": Status.PATCH_READY,
+            "no_changes": Status.NO_PATCH,
+            "blocked": Status.PATCH_BLOCKED,
+        }[result.status]
+        detail = (
+            f"{result.status}: {len(result.files)} file(s), "
+            f"+{result.additions} -{result.deletions}"
+        )
+        return {
+            "status": status,
+            "patch": result.model_dump(mode="json"),
+            "events": [_event("make_patch", detail)],
+        }
+
+    def review_patch_node(state: AgentState) -> dict[str, Any]:
+        # RULE: no side effects before interrupt(). On resume this node runs again from here.
+        patch = state.get("patch") or {}
+        request = {
+            "type": "patch_approval",
+            "run_id": state["run_id"],
+            "patch_hash": patch.get("patch_hash", ""),
+            "files": patch.get("files", []),
+            "additions": patch.get("additions", 0),
+            "deletions": patch.get("deletions", 0),
+            "size_bytes": patch.get("size_bytes", 0),
+            "diff_preview": patch.get("diff_preview", ""),
+            "truncated": patch.get("truncated", False),
+            "patch_path": patch.get("patch_path", ""),
+            "applies_to_base": patch.get("applies_to_base"),
+            "warnings": patch.get("warnings", []),
+            "weakened_tests": patch.get("weakened_tests", []),
+            "tests_passed": patch.get("tests_passed", False),
+            "execution_status": patch.get("execution_status", ""),
+            "fixed_tests": patch.get("fixed_tests", []),
+            "new_failures": patch.get("new_failures", []),
+            "requires_acknowledgement": patch.get("requires_acknowledgement", False),
+            "ack_reasons": patch.get("ack_reasons", []),
+            "base_commit": patch.get("base_commit", ""),
+            "branch": patch.get("branch", ""),
+        }
+
+        answer = interrupt(request)  # the graph stops here until a human answers
+
+        kept = {"status": Status.PATCH_REJECTED}  # NOT approved, and nothing is deleted
+        try:
+            decision = PatchDecision.model_validate(answer)
+        except ValidationError:
+            return {
+                **kept,
+                "events": [
+                    _event("review_patch", "invalid answer: not approved, changes kept")
+                ],
+            }
+        if decision.patch_hash and decision.patch_hash != request["patch_hash"]:
+            return {
+                **kept,
+                "events": [
+                    _event(
+                        "review_patch",
+                        "answer was for another patch: not approved, changes kept",
+                    )
+                ],
+            }
+
+        if decision.action == "reject":
+            note = "patch rejected; workspace changes discarded"
+            if deps.discard_patch is not None:
+                try:
+                    deps.discard_patch(state["run_id"])
+                except Exception as exc:  # noqa: BLE001
+                    note = "patch rejected; discarding FAILED: " + redact_secrets(str(exc))[:200]
+            return {**kept, "events": [_event("review_patch", note)]}
+
+        if request["requires_acknowledgement"] and not decision.accept_risk:
+            return {
+                **kept,
+                "events": [
+                    _event("review_patch", "risk not acknowledged: not approved, changes kept")
+                ],
+            }
+        if deps.accept_patch is None:
+            return _failed("review_patch", RuntimeError("no patch saver configured"))
+        try:
+            info = deps.accept_patch(
+                state["run_id"], request["patch_hash"], state.get("approved_files", [])
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _failed("review_patch", exc)
+        return {
+            "status": Status.PATCH_APPROVED,
+            "patch": {**patch, "approved_path": info.get("path", "")},
+            "events": [
+                _event(
+                    "review_patch",
+                    f"patch approved and saved ({len(request['files'])} file(s))",
+                )
+            ],
+        }
+
     graph = StateGraph(AgentState)
     graph.add_node("prepare", prepare_node)
     graph.add_node("index", index_node)
     graph.add_node("plan", plan_node)
     graph.add_node("approve_plan", approve_plan_node)
     graph.add_node("execute", execute_node)
+    graph.add_node("make_patch", make_patch_node)
+    graph.add_node("review_patch", review_patch_node)
 
     graph.add_edge(START, "prepare")
     graph.add_conditional_edges("prepare", route_after_step, {"next": "index", "end": END})
@@ -281,7 +411,13 @@ def build_graph(deps: AgentDeps, checkpointer: Any):
         route_after_decision,
         {"execute": "execute", "plan": "plan", "end": END},
     )
-    graph.add_edge("execute", END)
+    graph.add_conditional_edges(
+        "execute", route_after_execute, {"patch": "make_patch", "end": END}
+    )
+    graph.add_conditional_edges(
+        "make_patch", route_after_patch, {"review": "review_patch", "end": END}
+    )
+    graph.add_edge("review_patch", END)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -359,6 +495,7 @@ class AgentRunner:
             planning=values.get("planning", {}),
             events=values.get("events", []),
             execution=values.get("execution", {}),
+            patch=values.get("patch", {}),
         )
 
     def decide(self, run_id: str, decision: PlanDecision) -> RunStatus:
@@ -377,6 +514,31 @@ class AgentRunner:
                 "action": decision.action,
                 "plan_hash": shown,
                 "feedback_chars": len(decision.feedback),  # the text itself is not copied
+            },
+        )
+        self._graph.invoke(Command(resume=decision.model_dump()), self._config(run_id))
+        return self.status(run_id)
+
+    def decide_patch(self, run_id: str, decision: PatchDecision) -> RunStatus:
+        """Give the human's answer about the final patch, then continue."""
+        current = self.status(run_id)
+        if current.waiting_for != "review_patch":
+            raise WorkflowError(f"Run {run_id} is not waiting for a patch decision.")
+        shown = str(current.approval.get("patch_hash", ""))
+        if decision.patch_hash and decision.patch_hash != shown:
+            raise WorkflowError("That decision is for a different patch. Look at the current one.")
+        needs_ack = current.approval.get("requires_acknowledgement")
+        if decision.action == "approve" and needs_ack and not decision.accept_risk:
+            reasons = " ".join(current.approval.get("ack_reasons", []))
+            raise WorkflowError(f"This patch needs --accept-risk. Reasons: {reasons}")
+        decision = decision.model_copy(update={"patch_hash": shown})
+        self._audit(
+            run_id,
+            {
+                "event": "patch_decision",
+                "action": decision.action,
+                "patch_hash": shown,
+                "accept_risk": decision.accept_risk,
             },
         )
         self._graph.invoke(Command(resume=decision.model_dump()), self._config(run_id))

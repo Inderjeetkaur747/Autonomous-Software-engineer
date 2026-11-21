@@ -7,6 +7,7 @@ from typing import Any
 
 from swe_agent.agent.editor import EXECUTION_TOOLS
 from swe_agent.agent.executor import execute_plan
+from swe_agent.agent.patching import approve_patch, build_patch, discard_changes
 from swe_agent.agent.planning import load_issue, plan_issue
 from swe_agent.agent.workflow import AgentDeps
 from swe_agent.config import Settings, get_settings
@@ -22,6 +23,7 @@ from swe_agent.indexing import (
 from swe_agent.llm import GroqLLM
 from swe_agent.sandbox import get_runner
 from swe_agent.schemas.execution import ExecutionResult
+from swe_agent.schemas.patch import PatchResult
 from swe_agent.schemas.plan import ImplementationPlan
 from swe_agent.schemas.planning import PlanningResult
 from swe_agent.tools import EXPLORE_TOOLS, CodeSearcher, RepoTools
@@ -120,6 +122,49 @@ def make_default_deps(settings: Settings | None = None) -> AgentDeps:
         )
         return result
 
+    def make_patch(
+        run_id: str, approved_files: list[str], execution: dict[str, Any]
+    ) -> PatchResult:
+        workspace = WorkspaceManager(settings).get(run_id)
+        meta = json.loads((workspace.root / "run.json").read_text(encoding="utf-8"))
+        result, _data = build_patch(
+            workspace.repo_dir,
+            approved_files,
+            settings,
+            execution=execution,
+            base_commit=meta.get("base_commit", ""),
+            branch=meta.get("branch", ""),
+            write_to=workspace.root / "patch.diff",  # outside the repo, so it is not in the diff
+        )
+        (workspace.root / "patch.json").write_text(
+            result.model_dump_json(indent=2), encoding="utf-8"
+        )
+        return result
+
+    def accept_patch(run_id: str, patch_hash: str, approved_files: list[str]) -> dict[str, Any]:
+        workspace = WorkspaceManager(settings).get(run_id)
+        return approve_patch(
+            workspace.repo_dir,
+            approved_files,
+            patch_hash,
+            workspace.root,
+            settings,
+        )
+
+    def discard_patch(run_id: str) -> None:
+        workspace = WorkspaceManager(settings).get(run_id)
+        discard_changes(workspace.repo_dir)
+        candidate = workspace.root / "patch.diff"
+        if candidate.exists():
+            candidate.replace(workspace.root / "rejected.patch")
+
     return AgentDeps(
-        settings=settings, prepare=prepare, index=index, plan=plan, execute=execute
+        settings=settings,
+        prepare=prepare,
+        index=index,
+        plan=plan,
+        execute=execute,
+        make_patch=make_patch,
+        accept_patch=accept_patch,
+        discard_patch=discard_patch,
     )

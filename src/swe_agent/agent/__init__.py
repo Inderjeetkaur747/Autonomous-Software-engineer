@@ -19,6 +19,7 @@ from swe_agent.agent.workflow import (
 )
 from swe_agent.schemas.execution import ExecutionResult, ExecutionStatus
 from swe_agent.schemas.planning import PlanningResult, PlanningStatus
+from swe_agent.agent.patching import PatchError, approve_patch, build_patch, discard_changes
 
 __all__ = [
     "EXECUTION_TOOLS",
@@ -50,4 +51,8 @@ __all__ = [
     "plan_hash",
     "plan_issue",
     "run_edit_loop",
+    "PatchError", 
+    "approve_patch", 
+    "build_patch", 
+    "discard_changes"
 ]

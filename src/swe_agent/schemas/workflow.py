@@ -18,6 +18,13 @@ class PlanDecision(BaseModel):
             raise ValueError("Asking for a revision needs feedback text.")
         return self
 
+class PatchDecision(BaseModel):
+    """The human's answer to 'do you accept this patch?'"""
+
+    action: Literal["approve", "reject"]
+    patch_hash: str = Field(default="", max_length=64)  # hash of the patch that was shown
+    accept_risk: bool = False  # needed when tests failed or tests look weakened
+
 
 class RunStatus(BaseModel):
     """Everything a UI needs to know about one run."""
@@ -33,3 +40,4 @@ class RunStatus(BaseModel):
     planning: dict[str, Any] = Field(default_factory=dict)
     events: list[dict[str, Any]] = Field(default_factory=list)
     execution: dict[str, Any] = Field(default_factory=dict)
+    patch: dict[str, Any] = Field(default_factory=dict)
